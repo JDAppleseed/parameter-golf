@@ -1,20 +1,22 @@
 # Frontier Runs
 
-This repo is now wired for five legal frontier presets through [`research/run.py`](/Users/jonathandavanzo/Desktop/parameter-golf/research/run.py).
+This repo is now wired for five legal frontier presets through `research/run.py`.
+
+For RunPod / PyTorch-image setup, use [CLOUD_SETUP.md](CLOUD_SETUP.md) before launching these presets.
 
 Canonical control:
 
 - `control_verified_sota`
-- Trainer: [`train_gpt_frontier_control.py`](/Users/jonathandavanzo/Desktop/parameter-golf/train_gpt_frontier_control.py)
+- Trainer: `train_gpt_frontier_control.py`
 - This is the March 23 verified control family: LeakyReLU^2 + legal score-first TTT + Parallel Muon.
 - Treat this as the benchmark reference for all serious 8xH100 comparisons.
 
 Important legality and reproducibility notes:
 
-- Cache presets use a strict score-then-commit interface from [`frontier_cache.py`](/Users/jonathandavanzo/Desktop/parameter-golf/frontier_cache.py). A scored segment cannot be committed early, and the next segment cannot be scored until the prior one is committed.
+- Cache presets use a strict score-then-commit interface from `frontier_cache.py`. A scored segment cannot be committed early, and the next segment cannot be scored until the prior one is committed.
 - TTT remains score-first: each chunk is scored before any chunk-local adaptation step.
 - Cache-enabled distributed eval uses a canonical rank-0 evaluation path, then broadcasts metrics. This is slower than fully sharded eval, but it keeps cache semantics deterministic and legal.
-- `artifact_bytes` are measured from the counted code bundle plus the exported compressed model blob. The checkpoint helper in [`frontier_checkpoint.py`](/Users/jonathandavanzo/Desktop/parameter-golf/frontier_checkpoint.py) is included in `code_bytes`.
+- `artifact_bytes` are measured from the counted code bundle plus the exported compressed model blob. The checkpoint helper in `frontier_checkpoint.py` is included in `code_bytes`.
 - Exact frontier presets remain CUDA-only. For Apple Silicon smoke work, use the existing MLX proxy presets, not these final frontier trainers.
 
 ## Configs

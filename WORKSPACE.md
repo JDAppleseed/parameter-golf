@@ -39,8 +39,14 @@ CUDA remote setup:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-local.txt
 ```
+
+RunPod / shared PyTorch images:
+
+- Do not create a fresh isolated venv unless you intentionally want to rebuild the whole torch stack.
+- Do not reinstall torch on top of the image.
+- Use [CLOUD_SETUP.md](CLOUD_SETUP.md) instead of the local/self-managed CUDA install path above.
 
 ### 2. Download the Published SP-1024 Baseline Data
 
@@ -70,6 +76,12 @@ CUDA remote:
 ```bash
 python3 scripts/check_env.py --target cuda
 python3 scripts/check_data.py --data-path ./data/datasets/fineweb10B_sp1024 --tokenizer-path ./data/tokenizers/fineweb_1024_bpe.model --min-train-shards 1
+```
+
+Frontier CUDA / FlashAttention readiness:
+
+```bash
+python3 scripts/check_frontier_env.py
 ```
 
 ## One-Command Runs
@@ -134,7 +146,7 @@ Resume an interrupted launcher-managed run:
 python3 research/run.py --resume-run-dir research/results/runs/<timestamp>_<run_name>
 ```
 
-For the public-frontier recipe ladder and named CUDA presets, see [FRONTIER.md](FRONTIER.md).
+For the public-frontier recipe ladder and named CUDA presets, see [FRONTIER.md](FRONTIER.md). For RunPod / PyTorch-image setup, see [CLOUD_SETUP.md](CLOUD_SETUP.md).
 
 ## Rules-Safe Defaults
 

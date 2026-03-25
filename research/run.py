@@ -24,6 +24,7 @@ from research.presets import PRESETS, RUN_SCALES, Preset, RunScale
 from research.byte_budget import write_budget_reports
 from scripts.check_data import check_data
 from scripts.check_env import check_env
+from scripts.check_frontier_env import inspect_frontier_env
 
 
 RESULTS_ROOT = ROOT / "research" / "results"
@@ -593,6 +594,11 @@ def main() -> None:
         extra_modules = ["zstandard"] if resolved_env.get("COMPRESSOR") == "zstd" else []
         extra_modules.extend(preset.required_modules)
         preflight["env"] = check_env(preset.target, extra_modules=extra_modules)
+        if preset.target == "cuda" and "flash_attn_interface" in preset.required_modules:
+            preflight["frontier_env"] = inspect_frontier_env(require_flash_attn=True)
+            if not preflight["frontier_env"].get("ok_to_proceed"):
+                issues = "; ".join(preflight["frontier_env"].get("issues") or ["frontier env not ready"])
+                raise RuntimeError(f"Frontier CUDA preflight failed: {issues}")
         preflight["data"] = check_data(
             resolved_env["DATA_PATH"],
             resolved_env["TOKENIZER_PATH"],

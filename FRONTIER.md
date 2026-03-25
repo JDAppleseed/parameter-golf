@@ -69,8 +69,11 @@ Frontier CUDA preflight:
 
 ```bash
 python3 scripts/check_env.py --target cuda --require zstandard
+python3 scripts/check_frontier_env.py
 python3 scripts/check_data.py --data-path ./data/datasets/fineweb10B_sp1024 --tokenizer-path ./data/tokenizers/fineweb_1024_bpe.model --min-train-shards 1 --seq-len 2048
 ```
+
+On RunPod / shared PyTorch images, do not reinstall torch on top of the image. Use [CLOUD_SETUP.md](CLOUD_SETUP.md) before launching frontier presets.
 
 Run the frontier baseline on CUDA:
 
