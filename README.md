@@ -114,6 +114,7 @@ On your remote machine, clone the repo onto local disk.
 cd /workspace
 git clone https://github.com/openai/parameter-golf.git
 cd parameter-golf
+export PYTHONPATH=/workspace/parameter-golf${PYTHONPATH:+:$PYTHONPATH}
 ```
 
 If you are using the RunPod PyTorch image and want to run the frontier presets, do not reinstall torch on top of the image. Use the safe cloud setup path instead:

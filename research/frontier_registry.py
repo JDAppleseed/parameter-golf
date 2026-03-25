@@ -145,7 +145,7 @@ FRONTIER_PRESETS: dict[str, Preset] = {
             "Canonical control branch for all frontier comparisons.",
             "Matches the verified LeakyReLU^2 + legal TTT + Parallel Muon stack before cache experiments.",
         ),
-        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py"),
+        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py", "flash_attn_interface.py"),
         required_modules=("flash_attn_interface",),
         legality_summary=(
             "Score-first TTT: each chunk is scored under inference mode before any adaptation step.",
@@ -174,7 +174,7 @@ FRONTIER_PRESETS: dict[str, Preset] = {
             "Strictly backward-looking fixed-alpha cache.",
             "Keeps legal score-first TTT enabled so the cache is measured on the verified control stack rather than a different base.",
         ),
-        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py"),
+        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py", "flash_attn_interface.py"),
         required_modules=("flash_attn_interface",),
         legality_summary=(
             "Cache updates occur only after a scored segment is finalized.",
@@ -204,7 +204,7 @@ FRONTIER_PRESETS: dict[str, Preset] = {
             "Multi-order backoff over orders 2..7 with deterministic count-based mixing.",
             "Implements the narrow legal interpretation first: no entropy-adaptive alpha and no target-aware gates.",
         ),
-        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py"),
+        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py", "flash_attn_interface.py"),
         required_modules=("flash_attn_interface",),
         legality_summary=(
             "Backoff order selection depends only on previously committed counts.",
@@ -232,7 +232,7 @@ FRONTIER_PRESETS: dict[str, Preset] = {
             "Yellow-risk branch: strongest upside, but export/eval complexity is materially higher than the green control family.",
             "Uses full GPTQ inside the training/artifact-construction phase and keeps training-data access out of eval.",
         ),
-        counted_code_paths=("train_gpt_frontier_gptq.py", "frontier_cache.py", "frontier_checkpoint.py"),
+        counted_code_paths=("train_gpt_frontier_gptq.py", "frontier_cache.py", "frontier_checkpoint.py", "flash_attn_interface.py"),
         required_modules=("flash_attn_interface",),
         legality_summary=(
             "Full GPTQ calibration stays inside the training/artifact-construction phase for this workflow.",
@@ -260,7 +260,7 @@ FRONTIER_PRESETS: dict[str, Preset] = {
             "Green non-cache hedge if cache branches are too slow or review-risky.",
             "Propagates the training sequence length into Rotary construction on both train and eval paths.",
         ),
-        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py"),
+        counted_code_paths=("train_gpt_frontier_control.py", "frontier_cache.py", "frontier_checkpoint.py", "flash_attn_interface.py"),
         required_modules=("flash_attn_interface",),
         legality_summary=(
             "Uses the same legal score-first TTT protocol as the verified control.",

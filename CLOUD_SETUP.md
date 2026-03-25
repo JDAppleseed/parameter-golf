@@ -22,6 +22,7 @@ From a fresh SSH session:
 cd /workspace
 git clone https://github.com/openai/parameter-golf.git
 cd parameter-golf
+export PYTHONPATH=/workspace/parameter-golf${PYTHONPATH:+:$PYTHONPATH}
 ```
 
 Verify the image torch stack before changing anything:
@@ -63,6 +64,7 @@ python3 research/run.py --preset control_verified_sota --scale smoke --run-name 
 - `requirements-cloud.txt`: shared-image stack, preserves image torch
 - `scripts/install_cloud.sh`: safe cloud install helper
 - `scripts/check_frontier_env.py`: frontier CUDA / FlashAttention readiness check
+- `flash_attn_interface.py`: repo-local import shim so the trainers can use the installed flash-attn package consistently
 
 ## Manual Commands
 

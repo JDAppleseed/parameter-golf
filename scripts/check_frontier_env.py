@@ -12,6 +12,11 @@ import sys
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
 def _import_optional(module_name: str):
     try:
         return importlib.import_module(module_name), None
@@ -65,6 +70,7 @@ def inspect_frontier_env(*, require_flash_attn: bool = True) -> dict[str, object
     flash_attn_mod, flash_attn_exc = _import_optional("flash_attn_interface")
     flash_attn_ok = flash_attn_mod is not None
     flash_attn_error = None if flash_attn_exc is None else f"{type(flash_attn_exc).__name__}: {flash_attn_exc}"
+    flash_attn_path = None if flash_attn_mod is None else getattr(flash_attn_mod, "__file__", "unknown")
 
     nvcc_path, nvcc_version = _parse_nvcc_version()
     torch_cuda_version = str(torch.version.cuda or "")
@@ -118,6 +124,7 @@ def inspect_frontier_env(*, require_flash_attn: bool = True) -> dict[str, object
         "nvcc_version": nvcc_version,
         "flash_attn_interface_ok": flash_attn_ok,
         "flash_attn_interface_error": flash_attn_error,
+        "flash_attn_interface_path": flash_attn_path,
         "mismatch_risk": mismatch_risk,
         "issues": issues,
         "next_steps": next_steps,
@@ -143,6 +150,7 @@ def _print_summary(summary: dict[str, object]) -> None:
     print(f"nvcc_path: {summary.get('nvcc_path')}")
     print(f"nvcc_version: {summary.get('nvcc_version')}")
     print(f"flash_attn_interface_ok: {summary.get('flash_attn_interface_ok')}")
+    print(f"flash_attn_interface_path: {summary.get('flash_attn_interface_path')}")
     if summary.get("flash_attn_interface_error"):
         print(f"flash_attn_interface_error: {summary.get('flash_attn_interface_error')}")
     print(f"mismatch_risk: {summary.get('mismatch_risk')}")

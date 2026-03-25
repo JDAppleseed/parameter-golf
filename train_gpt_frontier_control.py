@@ -658,18 +658,24 @@ class Rotary(nn.Module):
             or self._seq_len_cached != seq_len
             or self._cos_cached.device != device
         ):
-            rd = self.rope_dims
-            if seq_len > self.train_seq_len:
-                scale = seq_len / self.train_seq_len
-                new_base = self.base * (scale ** (rd / (rd - 2)))
-                inv_freq = 1.0 / (new_base ** (torch.arange(0, rd, 2, dtype=torch.float32, device=device) / rd))
-            else:
-                inv_freq = self.inv_freq.to(device)
-            t = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
-            freqs = torch.outer(t, inv_freq)
-            self._cos_cached = freqs.cos()[None, :, None, :]
-            self._sin_cached = freqs.sin()[None, :, None, :]
-            self._seq_len_cached = seq_len
+            # Keep the cached tensors as ordinary no-grad tensors even when the
+            # score phase runs under inference_mode(), otherwise legal TTT can
+            # later reuse inference tensors in a grad-tracked forward.
+            with torch.inference_mode(False), torch.no_grad():
+                rd = self.rope_dims
+                if seq_len > self.train_seq_len:
+                    scale = seq_len / self.train_seq_len
+                    new_base = self.base * (scale ** (rd / (rd - 2)))
+                    inv_freq = 1.0 / (
+                        new_base ** (torch.arange(0, rd, 2, dtype=torch.float32, device=device) / rd)
+                    )
+                else:
+                    inv_freq = self.inv_freq.to(device)
+                t = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
+                freqs = torch.outer(t, inv_freq)
+                self._cos_cached = freqs.cos()[None, :, None, :]
+                self._sin_cached = freqs.sin()[None, :, None, :]
+                self._seq_len_cached = seq_len
         return self._cos_cached.to(dtype=dtype), self._sin_cached.to(dtype=dtype)
 def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor, rope_dims: int = 0) -> Tensor:
     if rope_dims > 0 and rope_dims < x.size(-1):
