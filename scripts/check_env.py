@@ -13,7 +13,7 @@ def _module_version(module) -> str:
     return str(getattr(module, "__version__", "unknown"))
 
 
-def check_env(target: str) -> dict[str, object]:
+def check_env(target: str, *, extra_modules: list[str] | None = None) -> dict[str, object]:
     if sys.version_info < (3, 9):
         raise RuntimeError(f"Python 3.9+ is required, found {platform.python_version()}")
 
@@ -33,8 +33,10 @@ def check_env(target: str) -> dict[str, object]:
         required_modules.append("torch")
     else:
         raise ValueError(f"Unsupported target {target!r}; expected 'mlx' or 'cuda'")
+    if extra_modules:
+        required_modules.extend(extra_modules)
 
-    for module_name in required_modules:
+    for module_name in dict.fromkeys(required_modules):
         try:
             module = importlib.import_module(module_name)
         except ImportError as exc:
@@ -107,11 +109,18 @@ def _print_summary(summary: dict[str, object]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fail-fast dependency and hardware checks for Parameter Golf presets.")
     parser.add_argument("--target", choices=("mlx", "cuda"), required=True)
+    parser.add_argument(
+        "--require",
+        action="append",
+        default=[],
+        metavar="MODULE",
+        help="Require an additional import, for example --require zstandard.",
+    )
     parser.add_argument("--json", action="store_true", help="Print the summary as JSON.")
     args = parser.parse_args()
 
     try:
-        summary = check_env(args.target)
+        summary = check_env(args.target, extra_modules=args.require)
     except Exception as exc:
         print(f"check_env failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

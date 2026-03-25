@@ -53,7 +53,7 @@ Happy training!
 
 ## Getting Started
 
-For a preset-driven local/remote workflow with preflight checks, per-run output directories, and structured run comparison, see [WORKSPACE.md](WORKSPACE.md).
+For a preset-driven local/remote workflow with preflight checks, per-run output directories, and structured run comparison, see [WORKSPACE.md](WORKSPACE.md). For the public-frontier recipe ladder and named ablation presets, see [FRONTIER.md](FRONTIER.md).
 
 ### Training Your First Model (Mac with Apple Silicon)
 

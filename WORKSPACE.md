@@ -6,7 +6,8 @@ This repository now has a thin research layer around the existing baseline train
 
 Core entrypoints:
 - `train_gpt_mlx.py`: Apple Silicon / MLX trainer for local iteration.
-- `train_gpt.py`: CUDA / torchrun trainer for remote runs and baseline reproduction.
+- `train_gpt.py`: CUDA / torchrun trainer for the simple public baseline path.
+- `train_gpt_frontier.py`: CUDA / torchrun trainer for the public-frontier recipe family and nearby ablations.
 - `data/cached_challenge_fineweb.py`: manifest-driven downloader for published FineWeb shards and tokenizer artifacts.
 - `records/`: historical record submissions, each with its own frozen `train_gpt.py`, README, logs, and `submission.json`.
 
@@ -85,6 +86,12 @@ Local development preset on Apple Silicon:
 python3 research/run.py --preset local_dev_mlx --run-name local_dev
 ```
 
+Frontier-proxy local probe on Apple Silicon:
+
+```bash
+python3 research/run.py --preset local_frontier_proxy_mlx --scale probe_short --run-name local_frontier_probe
+```
+
 Remote CUDA baseline on one GPU:
 
 ```bash
@@ -120,6 +127,14 @@ Compare runs:
 ```bash
 python3 research/compare_runs.py
 ```
+
+Resume an interrupted launcher-managed run:
+
+```bash
+python3 research/run.py --resume-run-dir research/results/runs/<timestamp>_<run_name>
+```
+
+For the public-frontier recipe ladder and named CUDA presets, see [FRONTIER.md](FRONTIER.md).
 
 ## Rules-Safe Defaults
 
