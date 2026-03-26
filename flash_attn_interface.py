@@ -6,12 +6,15 @@ actually satisfy its requirements. Otherwise they fall back to PyTorch SDP math.
 
 from __future__ import annotations
 
-import contextlib
+import math
 from typing import Callable
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+
+
+_dynamo_disable = getattr(getattr(torch, "_dynamo", None), "disable", lambda fn: fn)
 
 
 try:
@@ -57,6 +60,7 @@ def _should_emit_runtime_log() -> bool:
     return _ATTENTION_LOG_FN is not None and not _is_dynamo_compiling()
 
 
+@_dynamo_disable
 def _log_once(message: str) -> None:
     if not _should_emit_runtime_log() or message in _LOGGED_MESSAGES:
         return
@@ -83,19 +87,6 @@ def _flash_attention_eligibility(q: Tensor, k: Tensor, v: Tensor) -> tuple[bool,
     return True, "ok"
 
 
-def _math_sdp_context():
-    attention_mod = getattr(torch.nn, "attention", None)
-    if attention_mod is not None and hasattr(attention_mod, "sdpa_kernel") and hasattr(attention_mod, "SDPBackend"):
-        return attention_mod.sdpa_kernel(attention_mod.SDPBackend.MATH)
-    sdp_kernel = getattr(torch.backends.cuda, "sdp_kernel", None)
-    if sdp_kernel is None:
-        return contextlib.nullcontext()
-    try:
-        return sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False, enable_cudnn=False)
-    except TypeError:
-        return sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False)
-
-
 def _expand_gqa_heads(q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     q_heads = q.size(-2)
     kv_heads = k.size(-2)
@@ -115,14 +106,17 @@ def _sdp_math_attention(q: Tensor, k: Tensor, v: Tensor, *, enable_gqa: bool) ->
     q_sdp = q.transpose(1, 2)
     k_sdp = k.transpose(1, 2)
     v_sdp = v.transpose(1, 2)
-    with _math_sdp_context():
-        y = F.scaled_dot_product_attention(
-            q_sdp,
-            k_sdp,
-            v_sdp,
-            attn_mask=None,
-            is_causal=True,
-        )
+    q_len = q_sdp.size(-2)
+    k_len = k_sdp.size(-2)
+    offset = k_len - q_len
+    q_idx = torch.arange(q_len, device=q.device).unsqueeze(-1)
+    k_idx = torch.arange(k_len, device=q.device).unsqueeze(0)
+    causal_mask = k_idx > (q_idx + offset)
+    scores = torch.matmul(q_sdp.float(), k_sdp.float().transpose(-2, -1))
+    scores = scores * (1.0 / math.sqrt(q_sdp.size(-1)))
+    scores = scores.masked_fill(causal_mask, float("-inf"))
+    weights = F.softmax(scores, dim=-1)
+    y = torch.matmul(weights, v_sdp.float()).to(dtype=v_sdp.dtype)
     return y.transpose(1, 2).contiguous()
 
 
