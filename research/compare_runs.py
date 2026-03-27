@@ -14,14 +14,7 @@ if str(ROOT) not in sys.path:
 
 
 INDEX_JSONL = ROOT / "research" / "results" / "index.jsonl"
-PREFERRED_FINAL_LABELS = (
-    "legal_ttt",
-    "final_ttt",
-    "final_int8_zlib_roundtrip",
-    "final_int6_sliding_window_s64",
-    "final_int6_sliding_window",
-    "final_int6_roundtrip",
-)
+from research.submission_metrics import canonical_submission_eval, metric_payload_by_label
 
 
 def load_records() -> list[dict[str, object]]:
@@ -49,26 +42,13 @@ def load_records() -> list[dict[str, object]]:
 
 
 def preferred_eval(metrics: dict[str, object]) -> tuple[str | None, dict[str, object] | None]:
-    named_exact = metrics.get("named_evals_exact")
-    if isinstance(named_exact, dict):
-        for label in PREFERRED_FINAL_LABELS:
-            candidate = named_exact.get(label)
-            if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                return label, candidate
-    named = metrics.get("named_evals")
-    if isinstance(named, dict):
-        for label in PREFERRED_FINAL_LABELS:
-            candidate = named.get(label)
-            if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                return label, candidate
-    for legacy_label in ("final_roundtrip_exact", "final_roundtrip", "last_val"):
-        candidate = metrics.get(legacy_label)
-        if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-            return legacy_label, candidate
-    return None, None
+    return canonical_submission_eval(metrics)
 
 
 def final_bpb(record: dict[str, object]) -> float:
+    explicit = record.get("final_submission_bpb")
+    if explicit is not None:
+        return float(explicit)
     _label, candidate = preferred_eval(record.get("metrics") or {})
     if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
         return float(candidate["val_bpb"])
@@ -94,6 +74,12 @@ def train_time_seconds(record: dict[str, object]) -> float | None:
 
 
 def eval_time_seconds(record: dict[str, object]) -> float | None:
+    explicit_label = record.get("official_submission_metric_label") or record.get("final_submission_metric_label")
+    metrics = record.get("metrics") or {}
+    if explicit_label:
+        candidate = metric_payload_by_label(metrics, str(explicit_label))
+        if isinstance(candidate, dict) and candidate.get("eval_time_ms") is not None:
+            return float(candidate["eval_time_ms"]) / 1000.0
     _label, candidate = preferred_eval(record.get("metrics") or {})
     if isinstance(candidate, dict) and candidate.get("eval_time_ms") is not None:
         return float(candidate["eval_time_ms"]) / 1000.0
@@ -127,7 +113,10 @@ def trim(value: str, width: int) -> str:
 
 def summarized_record(record: dict[str, object]) -> dict[str, object]:
     metrics = record.get("metrics") or {}
-    label, candidate = preferred_eval(metrics)
+    label = record.get("official_submission_metric_label") or record.get("final_submission_metric_label")
+    candidate: dict[str, object] | None = metric_payload_by_label(metrics, str(label)) if label else None
+    if candidate is None:
+        label, candidate = preferred_eval(metrics)
     budget = record.get("byte_budget") or {}
     return {
         "run_name": record.get("run_name"),
@@ -136,7 +125,7 @@ def summarized_record(record: dict[str, object]) -> dict[str, object]:
         "status": record.get("status"),
         "legality": legality_status(record),
         "final_eval_label": label,
-        "val_bpb": None if candidate is None else candidate.get("val_bpb"),
+        "val_bpb": record.get("final_submission_bpb") if record.get("final_submission_bpb") is not None else (None if candidate is None else candidate.get("val_bpb")),
         "wall_clock_seconds": record.get("wall_clock_seconds"),
         "train_time_seconds": train_time_seconds(record),
         "eval_time_seconds": eval_time_seconds(record),

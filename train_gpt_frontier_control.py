@@ -32,6 +32,7 @@ from frontier_cache import (
     parse_cache_override_expectations_json,
     validate_cache_override_expectations,
 )
+from research.submission_metrics import canonical_submission_eval
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -1621,10 +1622,14 @@ def main() -> None:
     last_val_bpb: float | None = None
     last_val_loss: float | None = None
     last_train_loss: float | None = None
+    final_exact_evals: dict[str, dict[str, float]] = {}
 
     def write_summary(*, status: str, step: int, train_time_ms: float, note: str | None = None) -> None:
         if not master_process:
             return
+        final_label, final_metric = canonical_submission_eval({"named_evals_exact": final_exact_evals})
+        final_submission_loss = None if final_metric is None else final_metric.get("val_loss")
+        final_submission_bpb = None if final_metric is None else final_metric.get("val_bpb")
         atomic_json_dump(
             {
                 "run_id": args.run_id,
@@ -1636,8 +1641,14 @@ def main() -> None:
                 "last_train_loss": last_train_loss,
                 "last_val_loss": last_val_loss,
                 "last_val_bpb": last_val_bpb,
-                "best_val_loss": best_val_loss,
-                "best_val_bpb": best_val_bpb,
+                "best_val_loss": final_submission_loss if final_submission_loss is not None else best_val_loss,
+                "best_val_bpb": final_submission_bpb if final_submission_bpb is not None else best_val_bpb,
+                "training_best_val_loss": best_val_loss,
+                "training_best_val_bpb": best_val_bpb,
+                "final_submission_metric_label": final_label,
+                "official_submission_metric_label": final_label,
+                "final_submission_loss": final_submission_loss,
+                "final_submission_bpb": final_submission_bpb,
                 "checkpoint_path": str(checkpoint_path),
                 "resume_from": args.resume_from or None,
                 "note": note,
@@ -2154,6 +2165,7 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
     log0(f"final_int6_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+    final_exact_evals["final_int6_roundtrip"] = {"val_loss": q_val_loss, "val_bpb": q_val_bpb}
     sw_seq_len = effective_eval_seq_len
     if args.eval_stride > 0 and args.eval_stride < sw_seq_len:
         torch.cuda.synchronize()
@@ -2171,6 +2183,8 @@ def main() -> None:
         )
         log0(f"final_int6_sliding_window_exact val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}")
         log0(f"final_int8_zlib_roundtrip_exact val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}")
+        final_exact_evals["final_int6_sliding_window"] = {"val_loss": sw_val_loss, "val_bpb": sw_val_bpb}
+        final_exact_evals["final_int8_zlib_roundtrip"] = {"val_loss": sw_val_loss, "val_bpb": sw_val_bpb}
     if args.eval_stride != 64 and 64 < sw_seq_len:
         torch.cuda.synchronize()
         t_slide64 = time.perf_counter()
@@ -2187,6 +2201,8 @@ def main() -> None:
         )
         log0(f"final_int6_sliding_window_s64_exact val_loss:{sw64_val_loss:.8f} val_bpb:{sw64_val_bpb:.8f}")
         log0(f"final_int8_zlib_roundtrip_exact val_loss:{sw64_val_loss:.8f} val_bpb:{sw64_val_bpb:.8f}")
+        final_exact_evals["final_int6_sliding_window_s64"] = {"val_loss": sw64_val_loss, "val_bpb": sw64_val_bpb}
+        final_exact_evals["final_int8_zlib_roundtrip"] = {"val_loss": sw64_val_loss, "val_bpb": sw64_val_bpb}
     # Legal score-first TTT (PR #461 recipe)
     if args.ttt_enabled:
         torch.cuda.synchronize()
@@ -2200,6 +2216,7 @@ def main() -> None:
         log0(f"legal_ttt val_loss:{ttt_loss:.4f} val_bpb:{ttt_bpb:.4f} "
              f"eval_time:{1000.0 * (time.perf_counter() - t_ttt):.0f}ms")
         log0(f"legal_ttt_exact val_loss:{ttt_loss:.8f} val_bpb:{ttt_bpb:.8f}")
+        final_exact_evals["legal_ttt"] = {"val_loss": ttt_loss, "val_bpb": ttt_bpb}
     write_summary(status="completed", step=step, train_time_ms=training_time_ms, note="final_export_complete")
     if distributed:
         dist.destroy_process_group()

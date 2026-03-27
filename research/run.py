@@ -31,6 +31,11 @@ from frontier_cache import (
 from research.frontier_registry import FRONTIER_PRESETS, FRONTIER_SCALES
 from research.presets import PRESETS, RUN_SCALES, Preset, RunScale
 from research.byte_budget import write_budget_reports
+from research.submission_readiness import write_submission_readiness_reports
+from research.submission_metrics import (
+    canonical_submission_eval,
+    canonical_submission_fields,
+)
 from scripts.check_data import check_data
 from scripts.check_env import check_env
 from scripts.check_frontier_env import inspect_frontier_env
@@ -81,16 +86,6 @@ DIAGNOSTIC_LINE_RE = re.compile(
     r"^DIAGNOSTIC (?P<label>[A-Za-z0-9_+-]+) val_loss:(?P<val_loss>[-+0-9.eE]+) "
     r"val_bpb:(?P<val_bpb>[-+0-9.eE]+) eval_time:(?P<eval_time_ms>[-+0-9.eE]+)ms$"
 )
-PREFERRED_FINAL_LABELS = (
-    "legal_ttt",
-    "final_ttt",
-    "final_int8_zlib_roundtrip",
-    "final_int6_sliding_window_s64",
-    "final_int6_sliding_window",
-    "final_int6_roundtrip",
-)
-
-
 def slugify(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
     slug = slug.strip("._-")
@@ -327,23 +322,7 @@ def collect_artifacts(run_dir: Path) -> dict[str, object]:
 
 
 def preferred_eval(metrics: dict[str, object]) -> tuple[str | None, dict[str, object] | None]:
-    named_exact = metrics.get("named_evals_exact")
-    if isinstance(named_exact, dict):
-        for label in PREFERRED_FINAL_LABELS:
-            candidate = named_exact.get(label)
-            if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                return label, candidate
-    named = metrics.get("named_evals")
-    if isinstance(named, dict):
-        for label in PREFERRED_FINAL_LABELS:
-            candidate = named.get(label)
-            if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                return label, candidate
-    for legacy_label in ("final_roundtrip_exact", "final_roundtrip", "last_val"):
-        candidate = metrics.get(legacy_label)
-        if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-            return legacy_label, candidate
-    return None, None
+    return canonical_submission_eval(metrics)
 
 
 def final_bpb(metrics: dict[str, object]) -> float | None:
@@ -382,6 +361,8 @@ def write_legality_note(run_dir: Path, preset: Preset, result: dict[str, object]
         "status": legality_status,
         "artifact_budget_ok": artifact_budget_ok,
         "final_metric_present": final_metric_present,
+        "official_submission_metric_label": result.get("official_submission_metric_label") or result.get("final_submission_metric_label"),
+        "official_submission_bpb": result.get("final_submission_bpb"),
         "legality_summary": list(preset.legality_summary),
     }
     lines = [
@@ -389,6 +370,8 @@ def write_legality_note(run_dir: Path, preset: Preset, result: dict[str, object]
         f"Status: {legality_status}",
         f"Artifact budget ok: {note['artifact_budget_ok']}",
         f"Final metric present: {final_metric_present}",
+        f"Official submission metric: {note['official_submission_metric_label']}",
+        f"Official submission bpb: {note['official_submission_bpb']}",
         "",
         "Why this run is compliant:",
     ]
@@ -414,11 +397,8 @@ def regenerate_csv_index(records: list[dict[str, object]]) -> None:
                 "target": record.get("target"),
                 "status": record.get("status"),
                 "exit_code": record.get("exit_code"),
-                "final_val_bpb": final_bpb(metrics) or "",
-                "final_val_loss": (
-                    ((preferred_eval(metrics)[1]) or {}).get("val_loss")
-                    or ""
-                ),
+                "final_val_bpb": record.get("final_submission_bpb") or final_bpb(metrics) or "",
+                "final_val_loss": record.get("final_submission_loss") or (((preferred_eval(metrics)[1]) or {}).get("val_loss") or ""),
                 "compressed_model_bytes": record.get("compressed_model_bytes") or artifact_metrics.get("compressed_model_bytes_logged") or "",
                 "counted_code_bytes": record.get("counted_code_bytes") or "",
                 "submission_budget_estimate_bytes": record.get("submission_budget_estimate_bytes") or artifact_metrics.get("total_submission_bytes_logged") or "",
@@ -699,6 +679,7 @@ def main() -> None:
     wall_clock_seconds = round(time.time() - started_at, 3)
 
     metrics = parse_trainer_log(train_log_path if train_log_path.is_file() else launcher_log_path)
+    submission_fields = canonical_submission_fields(metrics)
     artifacts = collect_artifacts(run_dir)
     compressed_model_bytes = None
     for name, info in artifacts.items():
@@ -730,12 +711,14 @@ def main() -> None:
         ),
         "byte_budget": budget_report,
         "metrics": metrics,
+        **submission_fields,
     }
     if isinstance(budget_report, dict):
         result["exported_model_bytes"] = budget_report.get("exported_bytes_measured")
         result["artifact_bytes_measured"] = budget_report.get("artifact_bytes_measured")
         result["remaining_headroom_to_16mb"] = budget_report.get("remaining_headroom_to_16MB")
     result["legality_note"] = write_legality_note(run_dir, preset, result)
+    result["submission_readiness"] = write_submission_readiness_reports(run_dir, result)
     result_path = run_dir / "result.json"
     result["result_path"] = str(result_path)
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")

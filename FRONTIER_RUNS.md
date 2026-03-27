@@ -116,6 +116,14 @@ Inspect byte budget for a completed run:
 LATEST_RUN="$(ls -td research/results/runs/* | head -n 1)"
 cat "$LATEST_RUN/byte_budget.txt"
 cat "$LATEST_RUN/legality_note.txt"
+cat "$LATEST_RUN/submission_readiness.txt"
+```
+
+Check submission-readiness consistency or backfill canonical metric fields for an older run:
+
+```bash
+python3 scripts/submission_readiness.py --latest --family frontier
+python3 scripts/submission_readiness.py --run-dir research/results/runs/<timestamp_run_name> --rewrite
 ```
 
 ## Current H100 Policy
@@ -193,6 +201,12 @@ Every completed run directory now includes:
 - `byte_budget.json`
 - `byte_budget.txt`
 - `checkpoint_latest.pt` when checkpointing is enabled
+
+For completed frontier runs, `training_best_val_bpb` and `training_best_val_loss` remain the best pre-export training metrics.
+
+For official submission reporting, use `final_submission_metric_label`, `official_submission_metric_label`, `final_submission_bpb`, and `final_submission_loss`. `run_summary.json`, `result.json`, and `research/compare_runs.py` now converge on the same canonical submission metric.
+
+Old completed run directories are not auto-backfilled. Regenerate or rerun the export/finalization path if you need those fields added to older artifacts.
 
 The byte budget report is emitted automatically after a successful export and includes:
 
