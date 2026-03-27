@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from research.submission_metrics import canonical_submission_eval, canonical_submission_fields
+from research.submission_metrics import (
+    canonical_submission_eval,
+    canonical_submission_fields,
+    canonical_submission_fields_for_status,
+)
 
 
 class SubmissionMetricsTest(unittest.TestCase):
@@ -55,6 +59,22 @@ class SubmissionMetricsTest(unittest.TestCase):
                 "official_submission_metric_label": "legal_ttt_exact",
                 "final_submission_loss": 1.0,
                 "final_submission_bpb": 0.77418915,
+            },
+        )
+
+    def test_incomplete_run_has_no_official_submission_metric(self) -> None:
+        metrics = {
+            "named_evals_exact": {
+                "final_int6_roundtrip": {"val_loss": 1.5, "val_bpb": 1.20},
+            },
+        }
+        self.assertEqual(
+            canonical_submission_fields_for_status(metrics, status="failed"),
+            {
+                "final_submission_metric_label": None,
+                "official_submission_metric_label": None,
+                "final_submission_loss": None,
+                "final_submission_bpb": None,
             },
         )
 

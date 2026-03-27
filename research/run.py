@@ -34,7 +34,7 @@ from research.byte_budget import write_budget_reports
 from research.submission_readiness import write_submission_readiness_reports
 from research.submission_metrics import (
     canonical_submission_eval,
-    canonical_submission_fields,
+    canonical_submission_fields_for_status,
 )
 from scripts.check_data import check_data
 from scripts.check_env import check_env
@@ -773,7 +773,8 @@ def main() -> None:
     wall_clock_seconds = round(time.time() - started_at, 3)
 
     metrics = parse_trainer_log(train_log_path if train_log_path.is_file() else launcher_log_path)
-    submission_fields = canonical_submission_fields(metrics)
+    result_status = "completed" if exit_code == 0 else ("interrupted" if interrupted else "failed")
+    submission_fields = canonical_submission_fields_for_status(metrics, status=result_status)
     artifacts = collect_artifacts(run_dir)
     compressed_model_bytes = None
     for name, info in artifacts.items():
@@ -790,7 +791,7 @@ def main() -> None:
 
     result = {
         **run_spec,
-        "status": "completed" if exit_code == 0 else ("interrupted" if interrupted else "failed"),
+        "status": result_status,
         "exit_code": exit_code,
         "wall_clock_seconds": wall_clock_seconds,
         "train_log_path": str(train_log_path) if train_log_path.is_file() else None,
@@ -818,7 +819,7 @@ def main() -> None:
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     append_index(result)
 
-    best_bpb = final_bpb(metrics)
+    best_bpb = final_bpb(metrics) if result_status == "completed" else None
     if best_bpb is None:
         print(f"result: {result['status']} exit_code={exit_code} wall_clock_seconds={wall_clock_seconds}")
     else:

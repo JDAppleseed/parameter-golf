@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Mapping
 
-from research.submission_metrics import canonical_submission_fields
+from research.submission_metrics import canonical_submission_fields_for_status
 
 
 READINESS_JSON = "submission_readiness.json"
@@ -28,7 +28,12 @@ def _dump_json(path: Path, payload: Mapping[str, object]) -> None:
 
 def sync_result_submission_fields(result: Mapping[str, object]) -> dict[str, object]:
     updated = dict(result)
-    updated.update(canonical_submission_fields(updated.get("metrics") or {}))
+    updated.update(
+        canonical_submission_fields_for_status(
+            updated.get("metrics") or {},
+            status=str(updated.get("status") or "completed"),
+        )
+    )
     return updated
 
 
@@ -42,16 +47,15 @@ def sync_summary_submission_fields(
     final_label = result.get("official_submission_metric_label") or result.get("final_submission_metric_label")
     final_bpb = result.get("final_submission_bpb")
     final_loss = result.get("final_submission_loss")
+    updated["status"] = result.get("status", updated.get("status"))
     updated["training_best_val_bpb"] = training_best_val_bpb
     updated["training_best_val_loss"] = training_best_val_loss
     updated["final_submission_metric_label"] = result.get("final_submission_metric_label")
     updated["official_submission_metric_label"] = final_label
     updated["final_submission_bpb"] = final_bpb
     updated["final_submission_loss"] = final_loss
-    if final_bpb is not None:
-        updated["best_val_bpb"] = final_bpb
-    if final_loss is not None:
-        updated["best_val_loss"] = final_loss
+    updated["best_val_bpb"] = final_bpb if final_bpb is not None else training_best_val_bpb
+    updated["best_val_loss"] = final_loss if final_loss is not None else training_best_val_loss
     return updated
 
 
@@ -209,7 +213,10 @@ def refresh_submission_artifacts(run_dir: Path, *, rewrite: bool = False) -> dic
 
 
 def write_submission_readiness_reports(run_dir: Path, result: Mapping[str, object]) -> dict[str, object]:
-    summary = _load_json(run_dir / SUMMARY_JSON)
+    summary_path = run_dir / SUMMARY_JSON
+    summary = sync_summary_submission_fields(_load_json(summary_path), result) if summary_path.is_file() else None
+    if summary is not None:
+        _dump_json(summary_path, summary)
     legality_note = _load_json(run_dir / LEGALITY_JSON)
     byte_budget = _load_json(run_dir / BYTE_BUDGET_JSON)
     report = build_submission_readiness_report(result, summary, legality_note, byte_budget)

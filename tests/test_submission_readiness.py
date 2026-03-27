@@ -78,6 +78,31 @@ class SubmissionReadinessTest(unittest.TestCase):
         self.assertTrue(report["wall_clock_constraint_appears_satisfied"])
         self.assertTrue(report["consistent"])
 
+    def test_failed_run_clears_official_submission_fields(self) -> None:
+        result = sync_result_submission_fields(
+            {
+                "status": "failed",
+                "metrics": {
+                    "named_evals_exact": {
+                        "final_int6_roundtrip": {"val_loss": 1.5, "val_bpb": 1.20},
+                    },
+                },
+            }
+        )
+        summary = sync_summary_submission_fields(
+            {
+                "status": "running",
+                "best_val_loss": 2.0,
+                "best_val_bpb": 2.2145,
+            },
+            result,
+        )
+        note, _text = build_legality_note(result)
+        self.assertEqual(result["final_submission_metric_label"], None)
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["best_val_bpb"], 2.2145)
+        self.assertEqual(note["status"], "incomplete")
+
 
 if __name__ == "__main__":
     unittest.main()

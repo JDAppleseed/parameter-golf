@@ -49,6 +49,8 @@ def final_bpb(record: dict[str, object]) -> float:
     explicit = record.get("final_submission_bpb")
     if explicit is not None:
         return float(explicit)
+    if record.get("status") != "completed":
+        return math.inf
     _label, candidate = preferred_eval(record.get("metrics") or {})
     if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
         return float(candidate["val_bpb"])
@@ -80,6 +82,8 @@ def eval_time_seconds(record: dict[str, object]) -> float | None:
         candidate = metric_payload_by_label(metrics, str(explicit_label))
         if isinstance(candidate, dict) and candidate.get("eval_time_ms") is not None:
             return float(candidate["eval_time_ms"]) / 1000.0
+    if record.get("status") != "completed":
+        return None
     _label, candidate = preferred_eval(record.get("metrics") or {})
     if isinstance(candidate, dict) and candidate.get("eval_time_ms") is not None:
         return float(candidate["eval_time_ms"]) / 1000.0
@@ -115,7 +119,7 @@ def summarized_record(record: dict[str, object]) -> dict[str, object]:
     metrics = record.get("metrics") or {}
     label = record.get("official_submission_metric_label") or record.get("final_submission_metric_label")
     candidate: dict[str, object] | None = metric_payload_by_label(metrics, str(label)) if label else None
-    if candidate is None:
+    if candidate is None and record.get("status") == "completed":
         label, candidate = preferred_eval(metrics)
     budget = record.get("byte_budget") or {}
     return {

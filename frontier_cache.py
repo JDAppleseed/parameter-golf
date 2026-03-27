@@ -393,6 +393,28 @@ class ScoreFirstCausalCache:
 
         self._pending_positions = None
 
+    def replay_scored_positions(self, token_stream: np.ndarray, global_target_positions: np.ndarray) -> None:
+        """Advance the cache from positions that were already scored elsewhere.
+
+        This is used by distributed exact eval to reconstruct the same causal
+        cache state on every rank before/after each local shard. It does not
+        permit replay while a local score/commit pair is still pending.
+        """
+        if self.config.mode == "off":
+            return
+        if self._pending_positions is not None:
+            raise RuntimeError("cache replay ordering violated: cannot replay while a scored segment is pending")
+        positions64 = np.asarray(global_target_positions, dtype=np.int64)
+        for order in self.config.orders:
+            ctx_width = order - 1
+            valid = positions64 >= ctx_width
+            if not valid.any():
+                continue
+            positions = positions64[valid]
+            ctx_key, full_key = self._hashed_keys(token_stream, positions, order)
+            np.add.at(self.ctx_tables[order], ctx_key, 1)
+            np.add.at(self.full_tables[order], full_key, 1)
+
     def _entropy_alpha(self, entropies: np.ndarray, centers: np.ndarray) -> np.ndarray:
         scaled = self.config.entropy_slope * (entropies - centers)
         gate = 1.0 / (1.0 + np.exp(-scaled))

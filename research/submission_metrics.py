@@ -97,6 +97,21 @@ def canonical_submission_eval(metrics: Mapping[str, object] | None) -> tuple[str
 
 
 def canonical_submission_fields(metrics: Mapping[str, object] | None) -> dict[str, object]:
+    return canonical_submission_fields_for_status(metrics, status="completed")
+
+
+def canonical_submission_fields_for_status(
+    metrics: Mapping[str, object] | None,
+    *,
+    status: str | None,
+) -> dict[str, object]:
+    if status != "completed":
+        return {
+            "final_submission_metric_label": None,
+            "official_submission_metric_label": None,
+            "final_submission_loss": None,
+            "final_submission_bpb": None,
+        }
     label, payload = canonical_submission_eval(metrics)
     if payload is None:
         return {

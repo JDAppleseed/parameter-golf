@@ -32,6 +32,13 @@ from frontier_cache import (
     parse_cache_override_expectations_json,
     validate_cache_override_expectations,
 )
+from frontier_eval import (
+    assign_windows_to_score_chunks,
+    commit_position_range,
+    plan_distributed_window_shard,
+    reduce_eval_totals,
+    sliding_window_starts,
+)
 from research.submission_metrics import canonical_submission_eval
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -1131,77 +1138,82 @@ def eval_val_sliding(
     val_np = val_tokens.cpu().numpy()
     cache = causal_cache_from_env(dict(os.environ))
     use_cache_entropy = cache is not None and cache.config.uses_entropy
-    window_starts = [ws for ws in range(0, total_tokens, stride)
-                     if min(ws + seq_len, total_tokens) - ws >= 1]
+    window_starts = sliding_window_starts(total_tokens, seq_len, stride, require_full_stride=False)
     distributed = dist.is_available() and dist.is_initialized()
-    if cache is not None and distributed:
-        if rank != 0:
-            dist.barrier()
-            metrics = torch.zeros(2, device=device, dtype=torch.float64)
-            dist.broadcast(metrics, src=0)
-            base_model.train()
-            return float(metrics[0].item()), float(metrics[1].item())
-        my_windows = window_starts
-    else:
-        total_windows = len(window_starts)
-        my_s = (total_windows * rank) // world_size
-        my_e = (total_windows * (rank + 1)) // world_size
-        my_windows = window_starts[my_s:my_e]
+    if cache is not None and distributed and rank == 0:
+        print(
+            "sliding_eval:"
+            f" distributed_cache_shards=1"
+            f" world_size={world_size}"
+            f" chunk_tokens={args.ttt_chunk_tokens}"
+            f" stride={stride}"
+        )
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
     base_model.eval()
     compiled_logits = base_model.forward_logits
     with torch.inference_mode():
-        for bi in range(0, len(my_windows), batch_seqs):
-            batch_ws = my_windows[bi:bi + batch_seqs]
-            bsz = len(batch_ws)
-            x_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
-            y_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
-            wlens: list[int] = []
-            for i, ws in enumerate(batch_ws):
-                end = min(ws + seq_len, total_tokens)
-                wlen = end - ws
-                wlens.append(wlen)
-                chunk = val_tokens[ws:end + 1].to(dtype=torch.int64, device=device)
-                x_batch[i, :wlen] = chunk[:-1]
-                y_batch[i, :wlen] = chunk[1:]
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = compiled_logits(x_batch)
-            nll = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
-                y_batch.reshape(-1),
-                reduction="none",
-            ).reshape(bsz, seq_len)
-            for i, ws in enumerate(batch_ws):
-                wlen = wlens[i]
-                s = 0 if ws == 0 else max(wlen - stride, 0)
-                scored_nll = nll[i, s:wlen].to(torch.float64)
-                global_positions = np.arange(ws + s + 1, ws + wlen + 1, dtype=np.int64)
-                scored_entropy = None
-                if use_cache_entropy:
-                    scored_entropy = predictive_entropy_from_logits(logits[i, s:wlen])
-                scored_nll = apply_score_first_cache(cache, val_np, global_positions, scored_nll, scored_entropy)
-                loss_sum += scored_nll.sum()
-                token_count += float(wlen - s)
-                tgt = y_batch[i, s:wlen]
-                prev = x_batch[i, s:wlen]
-                tb = base_bytes_lut[tgt].to(torch.float64)
-                tb += (has_leading_space_lut[tgt] & ~is_boundary_token_lut[prev]).to(torch.float64)
-                byte_count += tb.sum()
-    if dist.is_available() and dist.is_initialized() and not (cache is not None and distributed):
-        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
-        dist.all_reduce(byte_count, op=dist.ReduceOp.SUM)
+        score_chunks = (
+            assign_windows_to_score_chunks(window_starts, total_tokens, seq_len, stride, args.ttt_chunk_tokens)
+            if cache is not None and distributed
+            else [window_starts]
+        )
+        for windows in score_chunks:
+            if not windows:
+                continue
+            if cache is not None and distributed:
+                shard_plan = plan_distributed_window_shard(windows, total_tokens, seq_len, stride, rank, world_size)
+                commit_position_range(cache, val_np, shard_plan.prefix_start, shard_plan.prefix_end)
+                my_windows = shard_plan.windows
+            else:
+                total_windows = len(windows)
+                my_s = (total_windows * rank) // world_size
+                my_e = (total_windows * (rank + 1)) // world_size
+                my_windows = list(windows[my_s:my_e])
+            for bi in range(0, len(my_windows), batch_seqs):
+                batch_ws = my_windows[bi:bi + batch_seqs]
+                bsz = len(batch_ws)
+                x_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                y_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                wlens: list[int] = []
+                for i, ws in enumerate(batch_ws):
+                    end = min(ws + seq_len, total_tokens)
+                    wlen = end - ws
+                    wlens.append(wlen)
+                    chunk = val_tokens[ws:end + 1].to(dtype=torch.int64, device=device)
+                    x_batch[i, :wlen] = chunk[:-1]
+                    y_batch[i, :wlen] = chunk[1:]
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits = compiled_logits(x_batch)
+                nll = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)).float(),
+                    y_batch.reshape(-1),
+                    reduction="none",
+                ).reshape(bsz, seq_len)
+                for i, ws in enumerate(batch_ws):
+                    wlen = wlens[i]
+                    s = 0 if ws == 0 else max(wlen - stride, 0)
+                    scored_nll = nll[i, s:wlen].to(torch.float64)
+                    global_positions = np.arange(ws + s + 1, ws + wlen + 1, dtype=np.int64)
+                    scored_entropy = None
+                    if use_cache_entropy:
+                        scored_entropy = predictive_entropy_from_logits(logits[i, s:wlen])
+                    scored_nll = apply_score_first_cache(cache, val_np, global_positions, scored_nll, scored_entropy)
+                    loss_sum += scored_nll.sum()
+                    token_count += float(wlen - s)
+                    tgt = y_batch[i, s:wlen]
+                    prev = x_batch[i, s:wlen]
+                    tb = base_bytes_lut[tgt].to(torch.float64)
+                    tb += (has_leading_space_lut[tgt] & ~is_boundary_token_lut[prev]).to(torch.float64)
+                    byte_count += tb.sum()
+            if cache is not None and distributed:
+                commit_position_range(cache, val_np, shard_plan.suffix_start, shard_plan.suffix_end)
+                dist.barrier()
+    loss_sum, token_count, byte_count = reduce_eval_totals(loss_sum, token_count, byte_count)
     val_loss = (loss_sum / token_count).item()
     bits_per_token = val_loss / math.log(2.0)
     tokens_per_byte = token_count.item() / byte_count.item()
-    if cache is not None and distributed:
-        metrics = torch.tensor([val_loss, bits_per_token * tokens_per_byte], device=device, dtype=torch.float64)
-        dist.barrier()
-        dist.broadcast(metrics, src=0)
-        base_model.train()
-        return float(metrics[0].item()), float(metrics[1].item())
     base_model.train()
     return val_loss, bits_per_token * tokens_per_byte
 
@@ -1221,32 +1233,16 @@ def eval_val_sliding_ttt(
     cache = causal_cache_from_env(dict(os.environ))
     use_cache_entropy = cache is not None and cache.config.uses_entropy
     distributed = dist.is_available() and dist.is_initialized()
-    if cache is not None and distributed and rank != 0:
-        dist.barrier()
-        metrics = torch.zeros(2, device=device, dtype=torch.float64)
-        dist.broadcast(metrics, src=0)
-        base_model.eval()
-        return float(metrics[0].item()), float(metrics[1].item())
-
-    # Pre-compute all window starts
-    window_starts = [ws for ws in range(0, total_tokens, stride)
-                     if min(ws + seq_len, total_tokens) - ws >= stride or ws == 0]
-
-    # Assign each window to a chunk based on the first token it scores
-    num_chunks = (total_tokens + ttt_chunk - 1) // ttt_chunk
-    chunk_windows: list[list[int]] = [[] for _ in range(num_chunks)]
-    for ws in window_starts:
-        end = min(ws + seq_len, total_tokens)
-        wlen = end - ws
-        s = 0 if ws == 0 else max(wlen - stride, 0)
-        scored_start = ws + s
-        ci = min(scored_start // ttt_chunk, num_chunks - 1)
-        chunk_windows[ci].append(ws)
+    window_starts = sliding_window_starts(total_tokens, seq_len, stride, require_full_stride=True)
+    chunk_windows = assign_windows_to_score_chunks(window_starts, total_tokens, seq_len, stride, ttt_chunk)
+    num_chunks = len(chunk_windows)
 
     log0(f"ttt_sliding:start chunks={num_chunks} chunk_tokens={ttt_chunk} "
          f"total_windows={len(window_starts)} stride={stride} "
          f"ttt_lr={args.ttt_lr} ttt_epochs={args.ttt_epochs} "
          f"freeze_blocks={args.ttt_freeze_blocks}")
+    if cache is not None and distributed:
+        log0(f"ttt_sliding:distributed_cache_shards world_size={world_size} chunk_tokens={ttt_chunk}")
 
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     token_count = torch.zeros((), device=device, dtype=torch.float64)
@@ -1281,7 +1277,11 @@ def eval_val_sliding_ttt(
         chunk_end = min((ci + 1) * ttt_chunk, total_tokens)
 
         # --- Phase 1: SCORE this chunk's windows (inference_mode) ---
-        if cache is not None:
+        if cache is not None and distributed:
+            shard_plan = plan_distributed_window_shard(windows, total_tokens, seq_len, stride, rank, world_size)
+            commit_position_range(cache, val_np, shard_plan.prefix_start, shard_plan.prefix_end)
+            my_windows = shard_plan.windows
+        elif cache is not None:
             my_windows = windows
         else:
             my_s = (len(windows) * rank) // world_size
@@ -1324,6 +1324,9 @@ def eval_val_sliding_ttt(
                     tb = base_bytes_lut[tgt].to(torch.float64)
                     tb += (has_leading_space_lut[tgt] & ~is_boundary_token_lut[prev]).to(torch.float64)
                     byte_count += tb.sum()
+        if cache is not None and distributed:
+            commit_position_range(cache, val_np, shard_plan.suffix_start, shard_plan.suffix_end)
+            dist.barrier()
 
         # --- Phase 2: TRAIN on this chunk (already scored = legal) ---
         is_last_chunk = (ci == num_chunks - 1)
@@ -1334,14 +1337,14 @@ def eval_val_sliding_ttt(
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
                     pg['lr'] = cos_lr
-                if cache is not None:
-                    my_seq_s = 0
-                    my_seq_e = chunk_seqs
-                    my_chunk_seqs = chunk_seqs
-                else:
+                if distributed:
                     my_seq_s = (chunk_seqs * rank) // world_size
                     my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                     my_chunk_seqs = my_seq_e - my_seq_s
+                else:
+                    my_seq_s = 0
+                    my_seq_e = chunk_seqs
+                    my_chunk_seqs = chunk_seqs
                 for _ep in range(args.ttt_epochs):
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
@@ -1357,7 +1360,7 @@ def eval_val_sliding_ttt(
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
-                        if world_size > 1 and cache is None:
+                        if world_size > 1:
                             for p in ttt_params:
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
@@ -1370,21 +1373,10 @@ def eval_val_sliding_ttt(
             rbpb = rl / math.log(2.0) * (token_count.item() / max(byte_count.item(), 1)) if token_count.item() > 0 else 0.0
             log0(f"  ttt_chunk [{ci+1}/{num_chunks}] bpb={rbpb:.6f} time={elapsed:.1f}s")
 
-    if dist.is_available() and dist.is_initialized() and not (cache is not None and distributed):
-        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
-        dist.all_reduce(byte_count, op=dist.ReduceOp.SUM)
+    loss_sum, token_count, byte_count = reduce_eval_totals(loss_sum, token_count, byte_count)
 
     val_loss = (loss_sum / token_count).item()
     val_bpb = val_loss / math.log(2.0) * (token_count.item() / byte_count.item())
-    if cache is not None and distributed:
-        metrics = torch.tensor([val_loss, val_bpb], device=device, dtype=torch.float64)
-        dist.barrier()
-        dist.broadcast(metrics, src=0)
-        for p in base_model.parameters():
-            p.requires_grad_(True)
-        base_model.eval()
-        return float(metrics[0].item()), float(metrics[1].item())
 
     for p in base_model.parameters():
         p.requires_grad_(True)
