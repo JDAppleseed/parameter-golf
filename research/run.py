@@ -19,6 +19,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from frontier_cache import (
+    CACHE_OVERRIDE_EXPECTATIONS_ENV,
+    apply_cache_override_priority,
+    cache_config_record,
+    cache_override_expectations_json,
+    causal_cache_config_from_env,
+    format_cache_config,
+    validate_cache_override_expectations,
+)
 from research.frontier_registry import FRONTIER_PRESETS, FRONTIER_SCALES
 from research.presets import PRESETS, RUN_SCALES, Preset, RunScale
 from research.byte_budget import write_budget_reports
@@ -583,6 +592,18 @@ def main() -> None:
     if resume_spec is not None and "RESUME_FROM" not in override_env and checkpoint_path.is_file():
         resolved_env["RESUME_FROM"] = str(checkpoint_path)
     resolved_env = absolutize_env_paths(resolved_env)
+    resolved_env = apply_cache_override_priority(resolved_env, os.environ)
+    resolved_cache_config = causal_cache_config_from_env(resolved_env)
+    validate_cache_override_expectations(
+        resolved_cache_config,
+        os.environ,
+        context="launcher resolved cache config",
+    )
+    cache_expectations_json = cache_override_expectations_json(os.environ)
+    if cache_expectations_json is not None:
+        resolved_env[CACHE_OVERRIDE_EXPECTATIONS_ENV] = cache_expectations_json
+    else:
+        resolved_env.pop(CACHE_OVERRIDE_EXPECTATIONS_ENV, None)
 
     nproc_per_node = args.nproc_per_node if args.nproc_per_node is not None else preset.nproc_per_node
     command = build_command(preset, nproc_per_node)
@@ -627,6 +648,7 @@ def main() -> None:
         "command": command,
         "counted_code_paths": counted_code_paths_for(preset),
         "resolved_env": resolved_env,
+        "resolved_cache_config": cache_config_record(resolved_cache_config),
         "nproc_per_node": nproc_per_node,
         "git_commit": git_commit(),
         "git_dirty": git_is_dirty(),
@@ -643,6 +665,8 @@ def main() -> None:
     print(f"preset: {preset.name}")
     if scale is not None:
         print(f"scale: {scale.name}")
+    if any(key.startswith("CAUSAL_CACHE_") for key in resolved_env):
+        print("resolved_cache: " + format_cache_config(resolved_cache_config))
     print("command: " + " ".join(command))
     if args.dry_run:
         return

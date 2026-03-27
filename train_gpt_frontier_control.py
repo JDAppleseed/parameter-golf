@@ -24,7 +24,14 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from flash_attn_interface import causal_attention, configure_attention_logging, flash_attention_import_summary
 from frontier_checkpoint import atomic_json_dump, atomic_torch_save, capture_rng_state, restore_rng_state
-from frontier_cache import causal_cache_config_from_env, causal_cache_from_env, format_order_entropy_centers
+from frontier_cache import (
+    CACHE_OVERRIDE_EXPECTATIONS_ENV,
+    causal_cache_config_from_env,
+    causal_cache_from_env,
+    format_cache_config,
+    parse_cache_override_expectations_json,
+    validate_cache_override_expectations,
+)
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -1554,6 +1561,11 @@ def main() -> None:
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
     cache_config = causal_cache_config_from_env(dict(os.environ))
+    validate_cache_override_expectations(
+        cache_config,
+        parse_cache_override_expectations_json(os.environ.get(CACHE_OVERRIDE_EXPECTATIONS_ENV)),
+        context="trainer startup cache config",
+    )
     cache_config.validate()
     # zeropower_via_newtonschulz5 runs eagerly with bmm -- do NOT compile
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
@@ -1792,25 +1804,7 @@ def main() -> None:
     xsa_layers = [i for i, b in enumerate(base_model.blocks) if b.attn.use_xsa]
     log0(f"XSA:last_{args.xsa_last_n} active_layers:{xsa_layers}")
     log0(f"rotary_fix:{args.rotary_fix} rotary_train_seq_len:{resolved_rotary_train_seq_len()}")
-    cache_gate = cache_config.mixing
-    if cache_config.mixing == "entropy":
-        cache_gate = "fixed_entropy"
-    elif cache_config.mixing == "order_entropy":
-        cache_gate = "order_adaptive_entropy"
-    log0(
-        "causal_cache:"
-        f" mode={cache_config.mode}"
-        f" order={cache_config.max_order}"
-        f" alpha={cache_config.alpha:.2f}"
-        f" gating={cache_gate}"
-        f" alpha_min={cache_config.alpha_min:.2f}"
-        f" alpha_max={cache_config.alpha_max:.2f}"
-        f" entropy_center={cache_config.entropy_center:.2f}"
-        f" entropy_slope={cache_config.entropy_slope:.2f}"
-        f" order_entropy_centers={format_order_entropy_centers(cache_config.order_entropy_centers or {})}"
-        f" mixing={cache_config.mixing}"
-        f" count_smoothing={cache_config.count_smoothing:.2f}"
-    )
+    log0(format_cache_config(cache_config))
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0("sdp_backends:cudnn=False flash=True mem_efficient=False math=False runtime_fallback=sdp_math")
     log0(f"attention_mode:gqa num_heads:{args.num_heads} num_kv_heads:{args.num_kv_heads}")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,6 +12,15 @@ _HASH_PRIMES = np.array(
 )
 _DEFAULT_ORDER_ENTROPY_CENTERS = {7: 3.0, 6: 3.2, 5: 3.5, 4: 3.8, 3: 4.2, 2: 4.5}
 _DEFAULT_ORDER_ENTROPY_CENTERS_TEXT = "7:3.0,6:3.2,5:3.5,4:3.8,3:4.2,2:4.5"
+CACHE_OVERRIDE_ENV_KEYS = (
+    "CAUSAL_CACHE_MIXING",
+    "CAUSAL_CACHE_ALPHA_MIN",
+    "CAUSAL_CACHE_ALPHA_MAX",
+    "CAUSAL_CACHE_ENTROPY_CENTER",
+    "CAUSAL_CACHE_ENTROPY_SLOPE",
+    "CAUSAL_CACHE_ORDER_ENTROPY_CENTERS",
+)
+CACHE_OVERRIDE_EXPECTATIONS_ENV = "CAUSAL_CACHE_EXPECTED_OVERRIDES_JSON"
 
 
 def _parse_order_entropy_centers(raw: str) -> dict[int, float]:
@@ -34,6 +44,33 @@ def _parse_order_entropy_centers(raw: str) -> dict[int, float]:
 
 def format_order_entropy_centers(centers: dict[int, float]) -> str:
     return ",".join(f"{order}:{centers[order]:.1f}" for order in sorted(centers, reverse=True))
+
+
+def cache_override_env(source: dict[str, str] | None) -> dict[str, str]:
+    if source is None:
+        return {}
+    return {key: source[key] for key in CACHE_OVERRIDE_ENV_KEYS if key in source}
+
+
+def cache_override_expectations_json(source: dict[str, str] | None) -> str | None:
+    overrides = cache_override_env(source)
+    if not overrides:
+        return None
+    return json.dumps(overrides, sort_keys=True, separators=(",", ":"))
+
+
+def parse_cache_override_expectations_json(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{CACHE_OVERRIDE_EXPECTATIONS_ENV} must encode a JSON object")
+    parsed: dict[str, str] = {}
+    for key, value in payload.items():
+        if key not in CACHE_OVERRIDE_ENV_KEYS:
+            raise ValueError(f"{CACHE_OVERRIDE_EXPECTATIONS_ENV} contained unsupported key {key!r}")
+        parsed[str(key)] = str(value)
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -95,6 +132,102 @@ class CausalCacheConfig:
     @property
     def uses_entropy(self) -> bool:
         return self.mixing in {"entropy", "order_entropy"}
+
+
+def format_cache_config(config: CausalCacheConfig) -> str:
+    cache_gate = config.mixing
+    if config.mixing == "entropy":
+        cache_gate = "fixed_entropy"
+    elif config.mixing == "order_entropy":
+        cache_gate = "order_adaptive_entropy"
+    return (
+        "causal_cache:"
+        f" mode={config.mode}"
+        f" order={config.max_order}"
+        f" alpha={config.alpha:.2f}"
+        f" gating={cache_gate}"
+        f" alpha_min={config.alpha_min:.2f}"
+        f" alpha_max={config.alpha_max:.2f}"
+        f" entropy_center={config.entropy_center:.2f}"
+        f" entropy_slope={config.entropy_slope:.2f}"
+        f" order_entropy_centers={format_order_entropy_centers(config.order_entropy_centers or {})}"
+        f" mixing={config.mixing}"
+        f" count_smoothing={config.count_smoothing:.2f}"
+    )
+
+
+def cache_config_record(config: CausalCacheConfig) -> dict[str, object]:
+    return {
+        "mode": config.mode,
+        "max_order": config.max_order,
+        "alpha": config.alpha,
+        "mixing": config.mixing,
+        "alpha_min": config.alpha_min,
+        "alpha_max": config.alpha_max,
+        "entropy_center": config.entropy_center,
+        "entropy_slope": config.entropy_slope,
+        "order_entropy_centers": format_order_entropy_centers(config.order_entropy_centers or {}),
+        "count_smoothing": config.count_smoothing,
+    }
+
+
+def apply_cache_override_priority(
+    resolved_env: dict[str, str],
+    shell_env: dict[str, str] | None,
+) -> dict[str, str]:
+    merged = dict(resolved_env)
+    for key, value in cache_override_env(shell_env).items():
+        merged[key] = value
+    return merged
+
+
+def _coerce_expected_override_value(key: str, raw: str) -> object:
+    if key in {"CAUSAL_CACHE_ALPHA_MIN", "CAUSAL_CACHE_ALPHA_MAX", "CAUSAL_CACHE_ENTROPY_CENTER", "CAUSAL_CACHE_ENTROPY_SLOPE"}:
+        return float(raw)
+    if key == "CAUSAL_CACHE_ORDER_ENTROPY_CENTERS":
+        return _parse_order_entropy_centers(raw)
+    return raw
+
+
+def _resolved_override_values(config: CausalCacheConfig) -> dict[str, object]:
+    return {
+        "CAUSAL_CACHE_MIXING": config.mixing,
+        "CAUSAL_CACHE_ALPHA_MIN": config.alpha_min,
+        "CAUSAL_CACHE_ALPHA_MAX": config.alpha_max,
+        "CAUSAL_CACHE_ENTROPY_CENTER": config.entropy_center,
+        "CAUSAL_CACHE_ENTROPY_SLOPE": config.entropy_slope,
+        "CAUSAL_CACHE_ORDER_ENTROPY_CENTERS": config.order_entropy_centers or {},
+    }
+
+
+def validate_cache_override_expectations(
+    config: CausalCacheConfig,
+    expected_overrides: dict[str, str] | None,
+    *,
+    context: str,
+) -> None:
+    overrides = cache_override_env(expected_overrides)
+    if not overrides:
+        return
+    resolved = _resolved_override_values(config)
+    mismatches: list[str] = []
+    for key, raw_value in overrides.items():
+        expected = _coerce_expected_override_value(key, raw_value)
+        actual = resolved[key]
+        if isinstance(expected, float):
+            if abs(float(actual) - expected) > 1e-12:
+                mismatches.append(f"{key} expected {expected:.12g} resolved {float(actual):.12g}")
+        elif key == "CAUSAL_CACHE_ORDER_ENTROPY_CENTERS":
+            if actual != expected:
+                mismatches.append(
+                    f"{key} expected {format_order_entropy_centers(expected)}"
+                    f" resolved {format_order_entropy_centers(actual)}"
+                )
+        elif actual != expected:
+            mismatches.append(f"{key} expected {expected!r} resolved {actual!r}")
+    if mismatches:
+        details = "; ".join(mismatches)
+        raise RuntimeError(f"{context} does not match requested cache overrides: {details}")
 
 
 class ScoreFirstCausalCache:

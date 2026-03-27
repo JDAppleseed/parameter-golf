@@ -118,24 +118,53 @@ cat "$LATEST_RUN/byte_budget.txt"
 cat "$LATEST_RUN/legality_note.txt"
 ```
 
+## Current H100 Policy
+
+- Preserve the stabilized H100 path. Keep FlashAttention working and do not reintroduce `torch.compile` into the frontier trainers.
+- Treat `sota_plus_ppm_entropy_fixed` as the default branch for serious runs.
+- Current branch of record: `sota_plus_ppm_entropy_fixed` at `legal_ttt val_bpb = 2.506169`.
+- For cache sweeps, trust the resolved startup `causal_cache:` line in the trainer log, or the launcher's `resolved_cache:` dry-run output. Run name and shell env alone are not sufficient.
+- Avoid tiny entropy-only knob sweeps unless they are bundled with a larger hypothesis.
+
 ## Promotion Ladder
 
-Recommended budget-first workflow:
+Stage A: promotion / validation
 
-1. Run `sota_plus_ppm_multiorder` at `half_run` on H100 first.
-2. Run `sota_plus_ppm_entropy_fixed` at `half_run` as the minimal entropy-gating baseline.
-3. Run `sota_plus_ppm_entropy_order_adaptive` at `half_run` as the next serious H100 upgrade path.
-4. Promote the best PPM variant immediately if it reproduces cleanly.
-5. Run `rotaryfix_bigram3072_legalttt` next only as the main non-cache hedge.
-6. Keep `control_verified_sota` as the canonical reference branch, not the default spend target.
-7. Treat `sota_plus_ngram7` as a lower-priority cache sanity check unless PPM becomes unstable or too slow.
-8. Keep `xsaall_fullgptq_prune_plus_cache` as a high-upside yellow branch after the PPM line is already confirmed.
+- Reconfirm `sota_plus_ppm_entropy_fixed` only when needed for confidence or before a larger promotion.
+- Use 1xH100 for surgical checks only.
+- Keep weaker branches parked unless they carry a new structural change.
 
-Recommended full-run shortlist:
+Stage B: stronger runs
 
-- Best of `sota_plus_ppm_multiorder` vs `sota_plus_ppm_entropy_fixed` vs `sota_plus_ppm_entropy_order_adaptive`
-- `rotaryfix_bigram3072_legalttt` if cache overhead is questionable
-- `xsaall_fullgptq_prune_plus_cache` only if cheap screening is clean and byte headroom remains healthy
+- Promote the best fixed-entropy branch to longer runs on 1xH100 or 2-3xH100 if supported by repo infrastructure.
+- Use these runs to test train-time / wallclock scaling on the winning branch, not to branch out widely.
+- Prioritize adaptation schedule changes, evaluation-side strategy changes, and other larger hypothesis-driven updates over minor entropy-threshold tuning.
+
+Stage C: leaderboard path
+
+- Only the strongest promoted branch should move to 8xH100 scale.
+- Reserve 8xH100 for runs with a clear promotion signal from smaller-scale results.
+
+## Practical Priorities
+
+Prioritize:
+
+- train-time / wallclock scaling on `sota_plus_ppm_entropy_fixed`
+- adaptation schedule changes
+- evaluation-side strategy changes
+- larger hypothesis-driven changes rather than minor entropy sweeps
+
+De-prioritize:
+
+- repeated center-only sweeps
+- repeated slope-only sweeps
+- re-testing known weaker branches without a new reason
+
+## Decision Rule
+
+- If a new half-run does not beat `2.506169` by a meaningful margin, do not promote it.
+- If a variant only ties within noise, keep `sota_plus_ppm_entropy_fixed` as the branch of record.
+- Promote only changes that show either a clear metric gain or a strong scaling rationale.
 
 ## Kill Criteria
 
@@ -178,13 +207,10 @@ The byte budget report is emitted automatically after a successful export and in
 
 ## Recommendation
 
-If you want one branch to get the first expensive 8xH100 full run after current H100 screening, make it `sota_plus_ppm_multiorder`.
+If you want one branch to get the next serious H100 spend, make it `sota_plus_ppm_entropy_fixed`.
 
 Reason:
 
-- it is the current best validated legal H100 direction in this repo snapshot
-- it materially outperformed the earlier smoke result and the other validated cache/control branches
-- it keeps the score-first legal story intact while showing real gain from backward-looking cache plus TTT
-- it is still materially cleaner and lower-risk than the full GPTQ branch
-
-If you want the next H100 upgrade to screen against that baseline, make it `sota_plus_ppm_entropy_order_adaptive`.
+- it is the current best validated legal half-run branch in this repo snapshot
+- it is clearly better than plain multiorder and current order-adaptive entropy results
+- recent center / slope sweeps are near saturation, so the next gains should come from scaling or larger structural changes rather than more tiny entropy tuning
