@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Mapping
 
-from research.submission_metrics import canonical_submission_fields_for_status
+from research.submission_metrics import canonical_submission_fields_for_status, metric_payload_by_label
 
 
 READINESS_JSON = "submission_readiness.json"
@@ -102,6 +102,23 @@ def build_legality_note(
     return note, "\n".join(lines) + "\n"
 
 
+def _eval_stage_seconds(metrics: Mapping[str, object] | None) -> dict[str, float]:
+    stages: dict[str, float] = {}
+    if not isinstance(metrics, Mapping):
+        return stages
+    diagnostics = metrics.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        for label, payload in diagnostics.items():
+            if isinstance(payload, Mapping) and payload.get("eval_time_ms") is not None:
+                stages[f"diagnostic_{label}"] = float(payload["eval_time_ms"]) / 1000.0
+    named = metrics.get("named_evals")
+    if isinstance(named, Mapping):
+        for label, payload in named.items():
+            if isinstance(payload, Mapping) and payload.get("eval_time_ms") is not None:
+                stages[str(label)] = float(payload["eval_time_ms"]) / 1000.0
+    return stages
+
+
 def build_submission_readiness_report(
     result: Mapping[str, object],
     summary: Mapping[str, object] | None,
@@ -111,6 +128,7 @@ def build_submission_readiness_report(
     official_label = result.get("official_submission_metric_label") or result.get("final_submission_metric_label")
     official_bpb = result.get("final_submission_bpb")
     official_loss = result.get("final_submission_loss")
+    metrics = result.get("metrics") if isinstance(result, Mapping) else None
     exported_bytes = None if not isinstance(byte_budget, Mapping) else byte_budget.get("exported_bytes_measured")
     code_bytes = None if not isinstance(byte_budget, Mapping) else byte_budget.get("code_bytes_measured")
     artifact_bytes = None if not isinstance(byte_budget, Mapping) else byte_budget.get("artifact_bytes_measured")
@@ -120,6 +138,12 @@ def build_submission_readiness_report(
         code_bytes = result.get("counted_code_bytes")
     train_time_ms = None if not isinstance(summary, Mapping) else summary.get("train_time_ms")
     max_wallclock_seconds = None if not isinstance(summary, Mapping) else summary.get("max_wallclock_seconds")
+    train_time_seconds = None if train_time_ms is None else float(train_time_ms) / 1000.0
+    eval_stages_seconds = _eval_stage_seconds(metrics if isinstance(metrics, Mapping) else None)
+    official_metric_payload = metric_payload_by_label(metrics if isinstance(metrics, Mapping) else None, str(official_label)) if official_label else None
+    official_submission_eval_seconds = None
+    if isinstance(official_metric_payload, Mapping) and official_metric_payload.get("eval_time_ms") is not None:
+        official_submission_eval_seconds = float(official_metric_payload["eval_time_ms"]) / 1000.0
     wall_clock_ok = None
     if train_time_ms is not None and max_wallclock_seconds is not None:
         wall_clock_ok = float(train_time_ms) <= float(max_wallclock_seconds) * 1000.0 + 1e-6
@@ -146,6 +170,9 @@ def build_submission_readiness_report(
         "official_submission_metric_label": official_label,
         "official_submission_bpb": official_bpb,
         "official_submission_loss": official_loss,
+        "train_time_seconds": train_time_seconds,
+        "official_submission_eval_seconds": official_submission_eval_seconds,
+        "eval_stages_seconds": eval_stages_seconds,
         "exported_model_bytes": exported_bytes,
         "code_bytes": code_bytes,
         "artifact_bytes": artifact_bytes,
@@ -166,6 +193,8 @@ def render_submission_readiness(report: Mapping[str, object]) -> str:
         f"final_submission_bpb: {report.get('final_submission_bpb')}",
         f"official_submission_bpb: {report.get('official_submission_bpb')}",
         f"official_submission_loss: {report.get('official_submission_loss')}",
+        f"train_time_seconds: {report.get('train_time_seconds')}",
+        f"official_submission_eval_seconds: {report.get('official_submission_eval_seconds')}",
         f"exported_model_bytes: {report.get('exported_model_bytes')}",
         f"code_bytes: {report.get('code_bytes')}",
         f"artifact_bytes: {report.get('artifact_bytes')}",
@@ -175,6 +204,11 @@ def render_submission_readiness(report: Mapping[str, object]) -> str:
         f"byte_budget_constraint_appears_satisfied: {report.get('byte_budget_constraint_appears_satisfied')}",
         f"consistent: {report.get('consistent')}",
     ]
+    eval_stages = report.get("eval_stages_seconds") or {}
+    if eval_stages:
+        lines.append("eval_stages_seconds:")
+        for label, seconds in eval_stages.items():
+            lines.append(f"- {label}: {seconds}")
     issues = report.get("issues") or []
     if issues:
         lines.append("issues:")

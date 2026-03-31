@@ -96,6 +96,7 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
+    eval_extra_s64 = bool(int(os.environ.get("EVAL_EXTRA_S64", "1")))
     mtp_num_heads = int(os.environ.get("MTP_NUM_HEADS", 0))
     mtp_loss_weight = float(os.environ.get("MTP_LOSS_WEIGHT", 0.2))
     muon_beta2 = float(os.environ.get("MUON_BETA2", 0.95))
@@ -1822,6 +1823,10 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"val_token_limit:{args.val_token_limit}")
+    log0(
+        f"eval_config:eval_stride={args.eval_stride} "
+        f"eval_extra_s64={args.eval_extra_s64} ttt_enabled={args.ttt_enabled}"
+    )
     log0(f"seed:{args.seed}")
     log0(
         f"run_safety:checkpoint_every={args.checkpoint_every} "
@@ -2177,7 +2182,7 @@ def main() -> None:
         log0(f"final_int8_zlib_roundtrip_exact val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}")
         final_exact_evals["final_int6_sliding_window"] = {"val_loss": sw_val_loss, "val_bpb": sw_val_bpb}
         final_exact_evals["final_int8_zlib_roundtrip"] = {"val_loss": sw_val_loss, "val_bpb": sw_val_bpb}
-    if args.eval_stride != 64 and 64 < sw_seq_len:
+    if args.eval_extra_s64 and args.eval_stride != 64 and 64 < sw_seq_len:
         torch.cuda.synchronize()
         t_slide64 = time.perf_counter()
         sw64_val_loss, sw64_val_bpb = eval_val_sliding(

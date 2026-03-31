@@ -42,6 +42,12 @@ class SubmissionReadinessTest(unittest.TestCase):
                 "git_commit": "deadbeef",
                 "submission_budget_estimate_bytes": 4_794_942,
                 "metrics": {
+                    "diagnostics": {
+                        "post_ema": {"eval_time_ms": 8404},
+                    },
+                    "named_evals": {
+                        "legal_ttt": {"val_loss": 1.0, "val_bpb": 0.77418915, "eval_time_ms": 716160},
+                    },
                     "named_evals_exact": {
                         "legal_ttt": {"val_loss": 1.0, "val_bpb": 0.77418915},
                     },
@@ -74,6 +80,10 @@ class SubmissionReadinessTest(unittest.TestCase):
         self.assertEqual(report["artifact_bytes"], 4_794_942)
         self.assertEqual(report["total_artifact_bytes"], 4_794_942)
         self.assertEqual(report["official_submission_metric_label"], "legal_ttt_exact")
+        self.assertEqual(report["train_time_seconds"], 300.0)
+        self.assertEqual(report["official_submission_eval_seconds"], 716.16)
+        self.assertEqual(report["eval_stages_seconds"]["diagnostic_post_ema"], 8.404)
+        self.assertEqual(report["eval_stages_seconds"]["legal_ttt"], 716.16)
         self.assertTrue(report["byte_budget_constraint_appears_satisfied"])
         self.assertTrue(report["wall_clock_constraint_appears_satisfied"])
         self.assertTrue(report["consistent"])
