@@ -6,6 +6,7 @@ from research.submission_metrics import (
     canonical_submission_eval,
     canonical_submission_fields,
     canonical_submission_fields_for_status,
+    metric_payload_by_label,
 )
 
 
@@ -44,6 +45,9 @@ class SubmissionMetricsTest(unittest.TestCase):
 
     def test_legal_ttt_exact_is_canonical_when_present(self) -> None:
         metrics = {
+            "named_evals": {
+                "legal_ttt": {"val_loss": 1.0, "val_bpb": 0.77418915, "eval_time_ms": 1234},
+            },
             "named_evals_exact": {
                 "final_int6_sliding_window": {"val_loss": 1.2, "val_bpb": 0.94086717},
                 "legal_ttt": {"val_loss": 1.0, "val_bpb": 0.77418915},
@@ -51,7 +55,9 @@ class SubmissionMetricsTest(unittest.TestCase):
         }
         label, payload = canonical_submission_eval(metrics)
         self.assertEqual(label, "legal_ttt_exact")
-        self.assertEqual(payload, metrics["named_evals_exact"]["legal_ttt"])
+        self.assertEqual(payload["val_loss"], metrics["named_evals_exact"]["legal_ttt"]["val_loss"])
+        self.assertEqual(payload["val_bpb"], metrics["named_evals_exact"]["legal_ttt"]["val_bpb"])
+        self.assertEqual(payload["eval_time_ms"], 1234)
         self.assertEqual(
             canonical_submission_fields(metrics),
             {
@@ -61,6 +67,8 @@ class SubmissionMetricsTest(unittest.TestCase):
                 "final_submission_bpb": 0.77418915,
             },
         )
+        merged_payload = metric_payload_by_label(metrics, "legal_ttt_exact")
+        self.assertEqual(merged_payload["eval_time_ms"], 1234)
 
     def test_incomplete_run_has_no_official_submission_metric(self) -> None:
         metrics = {

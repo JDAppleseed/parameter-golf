@@ -18,22 +18,43 @@ def _exact_metric_label(label: str) -> str:
     return label if label.endswith(EXACT_SUFFIX) else f"{label}{EXACT_SUFFIX}"
 
 
+def _merge_metric_payloads(
+    primary: dict[str, object] | None,
+    fallback: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if primary is None:
+        return fallback
+    if fallback is None:
+        return primary
+    merged = dict(fallback)
+    merged.update(primary)
+    return merged
+
+
 def metric_payload_by_label(metrics: Mapping[str, object] | None, label: str) -> dict[str, object] | None:
     if not isinstance(metrics, Mapping):
         return None
     base_label = _base_metric_label(label)
+    exact_candidate: dict[str, object] | None = None
     named_exact = metrics.get("named_evals_exact")
     if isinstance(named_exact, Mapping):
         for key in (label, base_label):
             candidate = named_exact.get(key)
             if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                return candidate
+                exact_candidate = candidate
+                break
+    named_candidate: dict[str, object] | None = None
     named = metrics.get("named_evals")
     if isinstance(named, Mapping):
         for key in (label, base_label):
             candidate = named.get(key)
             if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                return candidate
+                named_candidate = candidate
+                break
+    if exact_candidate is not None:
+        return _merge_metric_payloads(exact_candidate, named_candidate)
+    if named_candidate is not None:
+        return named_candidate
     candidate = metrics.get(label)
     if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
         return candidate
@@ -72,7 +93,7 @@ def canonical_submission_eval(metrics: Mapping[str, object] | None) -> tuple[str
     named_exact = metrics.get("named_evals_exact")
     if isinstance(named_exact, Mapping):
         for label in PRIMARY_SUBMISSION_LABELS:
-            candidate = metric_payload_by_label({"named_evals_exact": named_exact}, label)
+            candidate = metric_payload_by_label(metrics, label)
             if candidate is not None:
                 return label, candidate
         best_label, best_payload = _best_eval_from_mapping(named_exact, exact_labels=True)
@@ -82,7 +103,7 @@ def canonical_submission_eval(metrics: Mapping[str, object] | None) -> tuple[str
     named = metrics.get("named_evals")
     if isinstance(named, Mapping):
         for label in PRIMARY_SUBMISSION_LABELS:
-            candidate = metric_payload_by_label({"named_evals": named}, label)
+            candidate = metric_payload_by_label(metrics, label)
             if candidate is not None:
                 return label, candidate
         best_label, best_payload = _best_eval_from_mapping(named, exact_labels=False)
