@@ -33,10 +33,12 @@ Notes:
 
 - The wrapper hard-resets the repo checkout to `origin/<branch>` before each run stage.
 - It also wipes stale run outputs, the selected variant dataset/tokenizer artifacts, `data/manifest.json`, `docs_selected.*`, and temporary pip caches inside repo/tmp boundaries before rebuilding the pod state.
+- On a fresh pod it reruns the approved cloud installer, verifies that both `sentencepiece` and `flash_attn` import, installs them with the approved pip command if they do not, and only then runs the hard frontier environment gate.
 - It fails fast on missing CUDA/FlashAttention readiness, missing dataset shards, or missing tokenizer artifacts.
 - If you do not pass `--variant`, the script resolves a preset-compatible variant for `smoke`, `train`, and `all` so the stable SP8192 defaults stay launchable.
-- If the cached manifest does not publish the requested variant, the wrapper now bootstraps that variant locally from the published `docs_selected.jsonl` source using the repo's deterministic retokenizer path.
-- If neither the cached variant nor the published docs source is available, prep fails with the exact missing dataset name, manifest source, and the manual bootstrap command to rerun.
+- Ephemeral pods should use published cached artifacts by default. If the cached manifest does not publish the requested variant, prep now stops quickly by default with the missing dataset/tokenizer status and the exact manual bootstrap command.
+- Docs bootstrap is heavyweight and opt-in only via `--allow-docs-bootstrap`. It runs only after a conservative disk-space preflight and warns if `HF_TOKEN` is unset.
+- For large Hugging Face transfers, set `HF_TOKEN` before retrying any docs bootstrap path.
 
 ## Stable Lane
 

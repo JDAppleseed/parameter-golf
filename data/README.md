@@ -44,6 +44,8 @@ To inspect whether a cached variant is currently published before downloading, r
 python3 data/cached_challenge_fineweb.py --variant sp8192 --check-only --json
 ```
 
+For ephemeral cloud pods, published cached artifacts should be the default path. If a variant is missing from the cached manifest, prefer publishing the pretokenized dataset/tokenizer pair rather than rebuilding it on every pod.
+
 ## Rebuilding Tokenizers From Published Docs
 
 To retrain a tokenizer or re-export shards from exactly the same selected documents, run the standalone retokenizer against the published docs cache:
@@ -67,6 +69,8 @@ python3 data/download_hf_docs_and_tokenize.py \
 ```
 
 This is the path used by the RunPod frontier wrapper when a stable variant such as `sp8192` is not present in the published cached manifest but `docs_selected.jsonl` is available.
+
+This rebuild path is heavyweight. It is intended as an explicit fallback, not the default startup path for ephemeral pods. Large Hugging Face transfers are more reliable when `HF_TOKEN` is set first.
 
 The sidecar `docs_selected.source_manifest.json` includes `docs_sha256`, so users can verify they are rebuilding from the exact same document list and order as the baseline export.
 

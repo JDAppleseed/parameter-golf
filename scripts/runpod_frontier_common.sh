@@ -33,3 +33,27 @@ print(slug or "run")
 PY
 }
 
+python_import_available() {
+  python3 -c "import $1" >/dev/null 2>&1
+}
+
+free_disk_bytes() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+
+path = Path(sys.argv[1]).expanduser().resolve()
+target = path if path.exists() else path.parent
+print(shutil.disk_usage(target).free)
+PY
+}
+
+format_bytes_gib() {
+  python3 - "$1" <<'PY'
+import sys
+
+value = int(sys.argv[1])
+print(f"{value / (1024 ** 3):.1f} GiB")
+PY
+}

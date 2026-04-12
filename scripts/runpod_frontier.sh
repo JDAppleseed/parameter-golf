@@ -24,6 +24,7 @@ Options:
   --smoke-gpu-profile NAME        Smoke gpu profile. Default: local_cuda
   --train-gpu-profile NAME        Train gpu profile. Default: 8xh100
   --skip-smoke                    Skip the 1-GPU smoke run before train/all
+  --allow-docs-bootstrap          Allow heavyweight docs_selected.jsonl bootstrap when cached artifacts are unpublished
   --allow-missing-flash-attn      Relax only the final frontier env check for dry local/CPU edge cases
   -h, --help                      Show this help text
 EOF
@@ -45,6 +46,7 @@ SEED="1337"
 SMOKE_GPU_PROFILE="local_cuda"
 TRAIN_GPU_PROFILE="8xh100"
 SKIP_SMOKE=0
+ALLOW_DOCS_BOOTSTRAP=0
 ALLOW_MISSING_FLASH_ATTN=0
 STAGE=""
 RESOLVED_VARIANT=""
@@ -62,6 +64,8 @@ CACHED_TOKENIZER_PRESENT=0
 CACHED_MANIFEST_PATH=""
 CACHED_REPO_ID=""
 CACHED_REMOTE_ROOT_PREFIX=""
+DOCS_BOOTSTRAP_MIN_FREE_BYTES=$((80 * 1024 * 1024 * 1024))
+DOCS_BOOTSTRAP_WARN_FREE_BYTES=$((120 * 1024 * 1024 * 1024))
 
 variant_vocab_size() {
   case "$1" in
@@ -257,13 +261,75 @@ ensure_python_deps() {
     cd "$REPO_DIR"
     PYTHON=python3 ./scripts/install_cloud.sh || true
   )
-  if ! python3 -c "import sentencepiece" >/dev/null 2>&1; then
-    log "Installing missing dependency: sentencepiece"
-    TMPDIR=/tmp/pip-tmp PIP_CACHE_DIR=/tmp/pip-cache python3 -m pip install sentencepiece
+  if ! python_import_available sentencepiece || ! python_import_available flash_attn; then
+    log "STAGE deps: installing missing sentencepiece / flash-attn"
+    mkdir -p /tmp/pip-tmp /tmp/pip-cache
+    TMPDIR=/tmp/pip-tmp PIP_CACHE_DIR=/tmp/pip-cache python3 -m pip install sentencepiece flash-attn --no-build-isolation
   fi
-  if ! python3 -c "import flash_attn_interface" >/dev/null 2>&1; then
-    log "Installing missing dependency: flash-attn"
-    TMPDIR=/tmp/pip-tmp PIP_CACHE_DIR=/tmp/pip-cache python3 -m pip install flash-attn --no-build-isolation
+  if ! python_import_available sentencepiece; then
+    die "sentencepiece still does not import after install attempt."
+  fi
+  if ! python_import_available flash_attn; then
+    die "flash_attn still does not import after install attempt."
+  fi
+}
+
+wrapper_docs_bootstrap_command() {
+  printf 'bash scripts/runpod_frontier.sh %s --variant %s --train-shards %s --allow-docs-bootstrap' "$STAGE" "$1" "$2"
+}
+
+direct_docs_bootstrap_command() {
+  printf 'python3 data/download_hf_docs_and_tokenize.py --output-root ./data --tokenizer-config ./data/tokenizer_specs.json --variant %s --max-train-shards %s' "$1" "$2"
+}
+
+report_cached_variant_missing() {
+  local variant="$1"
+  local train_shards="$2"
+  die "$(cat <<EOF
+Requested variant: $variant
+Cached manifest dataset_present=$CACHED_DATASET_PRESENT tokenizer_present=$CACHED_TOKENIZER_PRESENT
+Manifest source: repo=$CACHED_REPO_ID root=$CACHED_REMOTE_ROOT_PREFIX path=$CACHED_MANIFEST_PATH
+Prep stopped because the requested cached pretokenized artifacts are not published.
+Ephemeral RunPod prep defaults to published cached artifacts only; docs bootstrap is disabled unless --allow-docs-bootstrap is set.
+Manual wrapper command:
+  $(wrapper_docs_bootstrap_command "$variant" "$train_shards")
+Direct bootstrap command:
+  $(direct_docs_bootstrap_command "$variant" "$train_shards")
+Operator notes:
+  - export HF_TOKEN=... before any large Hugging Face transfer
+  - docs bootstrap is heavyweight and may require substantial free disk
+  - publish the pretokenized dataset/tokenizer pair for fast pod startup
+EOF
+)"
+}
+
+docs_bootstrap_preflight() {
+  local variant="$1"
+  local free_bytes free_gib min_gib warn_gib
+  free_bytes="$(free_disk_bytes "$REPO_DIR/data")"
+  free_gib="$(format_bytes_gib "$free_bytes")"
+  min_gib="$(format_bytes_gib "$DOCS_BOOTSTRAP_MIN_FREE_BYTES")"
+  warn_gib="$(format_bytes_gib "$DOCS_BOOTSTRAP_WARN_FREE_BYTES")"
+  if [ "$free_bytes" -lt "$DOCS_BOOTSTRAP_MIN_FREE_BYTES" ]; then
+    die "$(cat <<EOF
+Requested variant: $variant
+Docs bootstrap was explicitly enabled, but prep stopped before download because free disk is too low.
+Available free disk near $REPO_DIR/data: $free_gib
+Required minimum for docs bootstrap: $min_gib
+Docs bootstrap may transfer and reconstruct a very large docs_selected.jsonl blob before tokenization/export.
+Manual bootstrap command:
+  $(direct_docs_bootstrap_command "$variant" "$TRAIN_SHARDS")
+Recommendation:
+  - use published cached artifacts for ephemeral pods whenever possible
+  - publish the pretokenized dataset/tokenizer pair for fast pod startup
+EOF
+)"
+  fi
+  if [ "$free_bytes" -lt "$DOCS_BOOTSTRAP_WARN_FREE_BYTES" ]; then
+    log "WARNING: docs bootstrap free disk is only $free_gib; large Hugging Face reconstruction may be fragile. Conservative warning threshold: $warn_gib."
+  fi
+  if [ -z "${HF_TOKEN:-}" ]; then
+    log "WARNING: HF_TOKEN is not set. Large Hugging Face transfers may be rate-limited or fail during docs bootstrap."
   fi
 }
 
@@ -302,6 +368,7 @@ fetch_variant_data() {
 bootstrap_variant_data() {
   local variant="$1"
   local train_shards="$2"
+  docs_bootstrap_preflight "$variant"
   log "STAGE bootstrap: cached manifest is missing $CACHED_DATASET_NAME, rebuilding $variant from published docs_selected.jsonl"
   if ! (
     cd "$REPO_DIR"
@@ -319,10 +386,13 @@ ensure_variant_data() {
   local variant="$1"
   local train_shards="$2"
   inspect_cached_variant_manifest "$variant"
-  if [ "$CACHED_DATASET_PRESENT" = "1" ]; then
+  if [ "$CACHED_DATASET_PRESENT" = "1" ] && [ "$CACHED_TOKENIZER_PRESENT" = "1" ]; then
     fetch_variant_data "$variant" "$train_shards"
     VARIANT_SOURCE="cached_manifest"
   else
+    if [ "$ALLOW_DOCS_BOOTSTRAP" -ne 1 ]; then
+      report_cached_variant_missing "$variant" "$train_shards"
+    fi
     bootstrap_variant_data "$variant" "$train_shards"
     VARIANT_SOURCE="rebuild_from_docs"
   fi
@@ -531,6 +601,10 @@ while [ "$#" -gt 0 ]; do
       SKIP_SMOKE=1
       shift
       ;;
+    --allow-docs-bootstrap)
+      ALLOW_DOCS_BOOTSTRAP=1
+      shift
+      ;;
     --allow-missing-flash-attn)
       ALLOW_MISSING_FLASH_ATTN=1
       shift
@@ -570,7 +644,7 @@ if [ "$TRAIN_RUN_NAME_EXPLICIT" -eq 0 ] && [ "$TRAIN_RUN_NAME" = "sp8192_mainlin
 fi
 
 log "Config: stage=$STAGE repo_dir=$REPO_DIR branch=$BRANCH variant=$RESOLVED_VARIANT train_shards=$TRAIN_SHARDS seed=$SEED"
-log "Config: smoke_preset=$SMOKE_PRESET train_preset=$TRAIN_PRESET skip_smoke=$SKIP_SMOKE"
+log "Config: smoke_preset=$SMOKE_PRESET train_preset=$TRAIN_PRESET skip_smoke=$SKIP_SMOKE allow_docs_bootstrap=$ALLOW_DOCS_BOOTSTRAP"
 log "Config: data_path=$RESOLVED_DATA_PATH tokenizer_path=$RESOLVED_TOKENIZER_PATH"
 
 case "$STAGE" in

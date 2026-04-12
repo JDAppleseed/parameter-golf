@@ -41,11 +41,12 @@ if changed:
 print("Torch stack unchanged after requirements-cloud.txt install.")
 PY
 
-if "$PYTHON" -c "import flash_attn_interface" >/dev/null 2>&1; then
-  echo "[install_cloud] flash_attn_interface already imports"
+if "$PYTHON" -c "import sentencepiece, flash_attn" >/dev/null 2>&1; then
+  echo "[install_cloud] sentencepiece and flash_attn already import"
 else
-  echo "[install_cloud] Installing flash-attn against the existing torch stack"
-  "$PYTHON" -m pip install flash-attn --no-build-isolation
+  echo "[install_cloud] Installing missing sentencepiece / flash-attn against the existing torch stack"
+  mkdir -p /tmp/pip-tmp /tmp/pip-cache
+  TMPDIR=/tmp/pip-tmp PIP_CACHE_DIR=/tmp/pip-cache "$PYTHON" -m pip install sentencepiece flash-attn --no-build-isolation
 fi
 
 echo "[install_cloud] Verifying that torch still matches the original image stack"
