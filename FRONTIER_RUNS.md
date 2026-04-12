@@ -18,6 +18,24 @@ The default branch-of-record is the SP8192 mainline family:
 
 Use these for stable-lane work. They are the only presets intended for automatic promotion and final submission packaging.
 
+## RunPod Quickstart
+
+For a clean H100 pod flow, use the wrapper script instead of manually chaining install, data, and launcher commands:
+
+```bash
+bash scripts/runpod_frontier.sh prep
+bash scripts/runpod_frontier.sh smoke
+bash scripts/runpod_frontier.sh train
+bash scripts/runpod_frontier.sh all
+```
+
+Notes:
+
+- The wrapper hard-resets the repo checkout to `origin/<branch>` before each run stage.
+- It fails fast on missing CUDA/FlashAttention readiness, missing dataset shards, or missing tokenizer artifacts.
+- If you do not pass `--variant`, the script resolves a preset-compatible variant for `smoke`, `train`, and `all` so the stable SP8192 defaults stay launchable.
+- Cached-manifest downloads for unpublished variants such as `sp8192` can fail. When that happens, publish the variant or rebuild it before launching the real run.
+
 ## Stable Lane
 
 Stable-lane rules:
@@ -34,6 +52,12 @@ Recommended commands:
 python3 research/run.py --preset sp8192_mainline_base --scale smoke --run-name sp8192_mainline_base_smoke --seed 1337 --nproc-per-node 1 --gpu-profile local_cuda
 python3 research/run.py --preset sp8192_mainline_recur345_par7_qk525_ttt --scale half_run --run-name sp8192_mainline_half --seed 1337 --nproc-per-node 1 --gpu-profile 1xh100
 python3 research/run.py --preset sp8192_mainline_submit_safe --scale submit_safe --run-name sp8192_mainline_submit --seed 1337 --nproc-per-node 8 --gpu-profile 8xh100
+```
+
+Equivalent wrapper for the stable mainline submit-safe launch:
+
+```bash
+bash scripts/runpod_frontier.sh train --variant sp8192 --train-preset sp8192_mainline_submit_safe
 ```
 
 Quantization and tokenizer surfaces:
