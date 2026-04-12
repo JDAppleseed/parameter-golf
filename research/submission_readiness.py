@@ -32,6 +32,7 @@ def sync_result_submission_fields(result: Mapping[str, object]) -> dict[str, obj
         canonical_submission_fields_for_status(
             updated.get("metrics") or {},
             status=str(updated.get("status") or "completed"),
+            track=str(updated.get("track")) if updated.get("track") else None,
         )
     )
     return updated
@@ -70,6 +71,7 @@ def build_legality_note(
         artifact_bytes = result.get("submission_budget_estimate_bytes")
     final_metric_present = result.get("final_submission_bpb") is not None
     artifact_budget_ok = artifact_bytes is None or int(artifact_bytes) <= 16_000_000
+    manual_review_required = bool(result.get("requires_manual_rule_review") or result.get("manual_review_required"))
     if status != "completed":
         legality_status = "incomplete"
     elif not artifact_budget_ok or not final_metric_present:
@@ -82,6 +84,7 @@ def build_legality_note(
             "status": legality_status,
             "artifact_budget_ok": artifact_budget_ok,
             "final_metric_present": final_metric_present,
+            "manual_review_required": manual_review_required,
             "official_submission_metric_label": result.get("official_submission_metric_label") or result.get("final_submission_metric_label"),
             "official_submission_bpb": result.get("final_submission_bpb"),
         }
@@ -92,6 +95,7 @@ def build_legality_note(
         f"Status: {note['status']}",
         f"Artifact budget ok: {note['artifact_budget_ok']}",
         f"Final metric present: {note['final_metric_present']}",
+        f"Manual review required: {note['manual_review_required']}",
         f"Official submission metric: {note['official_submission_metric_label']}",
         f"Official submission bpb: {note['official_submission_bpb']}",
         "",
@@ -144,10 +148,27 @@ def build_submission_readiness_report(
     official_submission_eval_seconds = None
     if isinstance(official_metric_payload, Mapping) and official_metric_payload.get("eval_time_ms") is not None:
         official_submission_eval_seconds = float(official_metric_payload["eval_time_ms"]) / 1000.0
-    wall_clock_ok = None
+    train_budget_ok = None
     if train_time_ms is not None and max_wallclock_seconds is not None:
-        wall_clock_ok = float(train_time_ms) <= float(max_wallclock_seconds) * 1000.0 + 1e-6
+        train_budget_ok = float(train_time_ms) <= float(max_wallclock_seconds) * 1000.0 + 1e-6
+    official_eval_budget_ok = None
+    if official_submission_eval_seconds is not None and max_wallclock_seconds is not None:
+        official_eval_budget_ok = official_submission_eval_seconds <= float(max_wallclock_seconds) + 1e-6
     byte_budget_ok = None if artifact_bytes is None else int(artifact_bytes) <= 16_000_000
+    end_to_end_budget_ok = None
+    if train_time_seconds is not None and official_submission_eval_seconds is not None and max_wallclock_seconds is not None:
+        end_to_end_budget_ok = (train_time_seconds + official_submission_eval_seconds) <= float(max_wallclock_seconds) + 1e-6
+    manual_review_required = bool(result.get("requires_manual_rule_review") or result.get("manual_review_required"))
+    lane = result.get("lane")
+    submission_safe = bool(
+        result.get("submission_safe")
+        and not manual_review_required
+        and lane == "stable"
+        and (legality_note or {}).get("status") == "legal"
+        and byte_budget_ok is not False
+        and train_budget_ok is not False
+        and official_bpb is not None
+    )
 
     issues: list[str] = []
     if isinstance(summary, Mapping):
@@ -162,23 +183,35 @@ def build_submission_readiness_report(
             issues.append("legality_note official_submission_metric_label does not match result.json")
         if legality_note.get("official_submission_bpb") != official_bpb:
             issues.append("legality_note official_submission_bpb does not match result.json")
+        if legality_note.get("manual_review_required") != manual_review_required:
+            issues.append("legality_note manual_review_required does not match result.json")
 
     return {
         "completion_status": result.get("status"),
         "git_commit": result.get("git_commit"),
+        "lane": lane,
+        "track": result.get("track"),
+        "risk": result.get("risk"),
         "final_submission_bpb": result.get("final_submission_bpb"),
         "official_submission_metric_label": official_label,
         "official_submission_bpb": official_bpb,
         "official_submission_loss": official_loss,
         "train_time_seconds": train_time_seconds,
         "official_submission_eval_seconds": official_submission_eval_seconds,
+        "export_seconds": result.get("export_seconds"),
         "eval_stages_seconds": eval_stages_seconds,
         "exported_model_bytes": exported_bytes,
         "code_bytes": code_bytes,
         "artifact_bytes": artifact_bytes,
         "total_artifact_bytes": artifact_bytes,
         "legality_status": None if not isinstance(legality_note, Mapping) else legality_note.get("status"),
-        "wall_clock_constraint_appears_satisfied": wall_clock_ok,
+        "train_budget_ok": train_budget_ok,
+        "official_eval_budget_ok": official_eval_budget_ok,
+        "artifact_budget_ok": byte_budget_ok,
+        "end_to_end_budget_ok": end_to_end_budget_ok,
+        "submission_safe": submission_safe,
+        "manual_review_required": manual_review_required,
+        "wall_clock_constraint_appears_satisfied": train_budget_ok,
         "byte_budget_constraint_appears_satisfied": byte_budget_ok,
         "consistent": not issues,
         "issues": issues,
@@ -189,17 +222,27 @@ def render_submission_readiness(report: Mapping[str, object]) -> str:
     lines = [
         f"completion_status: {report.get('completion_status')}",
         f"git_commit: {report.get('git_commit')}",
+        f"lane: {report.get('lane')}",
+        f"track: {report.get('track')}",
+        f"risk: {report.get('risk')}",
         f"official_submission_metric_label: {report.get('official_submission_metric_label')}",
         f"final_submission_bpb: {report.get('final_submission_bpb')}",
         f"official_submission_bpb: {report.get('official_submission_bpb')}",
         f"official_submission_loss: {report.get('official_submission_loss')}",
         f"train_time_seconds: {report.get('train_time_seconds')}",
         f"official_submission_eval_seconds: {report.get('official_submission_eval_seconds')}",
+        f"export_seconds: {report.get('export_seconds')}",
         f"exported_model_bytes: {report.get('exported_model_bytes')}",
         f"code_bytes: {report.get('code_bytes')}",
         f"artifact_bytes: {report.get('artifact_bytes')}",
         f"total_artifact_bytes: {report.get('total_artifact_bytes')}",
         f"legality_status: {report.get('legality_status')}",
+        f"train_budget_ok: {report.get('train_budget_ok')}",
+        f"official_eval_budget_ok: {report.get('official_eval_budget_ok')}",
+        f"artifact_budget_ok: {report.get('artifact_budget_ok')}",
+        f"end_to_end_budget_ok: {report.get('end_to_end_budget_ok')}",
+        f"submission_safe: {report.get('submission_safe')}",
+        f"manual_review_required: {report.get('manual_review_required')}",
         f"wall_clock_constraint_appears_satisfied: {report.get('wall_clock_constraint_appears_satisfied')}",
         f"byte_budget_constraint_appears_satisfied: {report.get('byte_budget_constraint_appears_satisfied')}",
         f"consistent: {report.get('consistent')}",

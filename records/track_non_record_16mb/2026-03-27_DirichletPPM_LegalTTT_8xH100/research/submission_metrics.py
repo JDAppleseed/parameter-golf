@@ -8,30 +8,6 @@ PRIMARY_SUBMISSION_LABELS = (
     "legal_ttt_exact",
     "final_int6_sliding_window_exact",
 )
-PRIMARY_SUBMISSION_LABELS_BY_TRACK = {
-    "score_first_ttt": (
-        "legal_ttt_exact",
-        "final_ttt_exact",
-        "final_sliding_window_exact",
-        "final_int6_sliding_window_exact",
-        "final_roundtrip_exact",
-        "final_int8_zlib_roundtrip_exact",
-    ),
-    "prequant_ttt": (
-        "prequant_ttt_exact",
-        "legal_ttt_exact",
-        "final_ttt_exact",
-        "final_sliding_window_exact",
-        "final_int6_sliding_window_exact",
-        "final_roundtrip_exact",
-    ),
-    "fixed_predictor": (
-        "final_sliding_window_exact",
-        "final_int6_sliding_window_exact",
-        "final_roundtrip_exact",
-        "final_int8_zlib_roundtrip_exact",
-    ),
-}
 
 
 def _base_metric_label(label: str) -> str:
@@ -42,43 +18,22 @@ def _exact_metric_label(label: str) -> str:
     return label if label.endswith(EXACT_SUFFIX) else f"{label}{EXACT_SUFFIX}"
 
 
-def _merge_metric_payloads(
-    primary: dict[str, object] | None,
-    fallback: dict[str, object] | None,
-) -> dict[str, object] | None:
-    if primary is None:
-        return fallback
-    if fallback is None:
-        return primary
-    merged = dict(fallback)
-    merged.update(primary)
-    return merged
-
-
 def metric_payload_by_label(metrics: Mapping[str, object] | None, label: str) -> dict[str, object] | None:
     if not isinstance(metrics, Mapping):
         return None
     base_label = _base_metric_label(label)
-    exact_candidate: dict[str, object] | None = None
     named_exact = metrics.get("named_evals_exact")
     if isinstance(named_exact, Mapping):
         for key in (label, base_label):
             candidate = named_exact.get(key)
             if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                exact_candidate = candidate
-                break
-    named_candidate: dict[str, object] | None = None
+                return candidate
     named = metrics.get("named_evals")
     if isinstance(named, Mapping):
         for key in (label, base_label):
             candidate = named.get(key)
             if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
-                named_candidate = candidate
-                break
-    if exact_candidate is not None:
-        return _merge_metric_payloads(exact_candidate, named_candidate)
-    if named_candidate is not None:
-        return named_candidate
+                return candidate
     candidate = metrics.get(label)
     if isinstance(candidate, dict) and candidate.get("val_bpb") is not None:
         return candidate
@@ -110,25 +65,14 @@ def _best_eval_from_mapping(
     return best_label, best_payload
 
 
-def _primary_labels_for_track(track: str | None) -> tuple[str, ...]:
-    if track is None:
-        return PRIMARY_SUBMISSION_LABELS
-    return PRIMARY_SUBMISSION_LABELS_BY_TRACK.get(track, PRIMARY_SUBMISSION_LABELS)
-
-
-def canonical_submission_eval(
-    metrics: Mapping[str, object] | None,
-    *,
-    track: str | None = None,
-) -> tuple[str | None, dict[str, object] | None]:
+def canonical_submission_eval(metrics: Mapping[str, object] | None) -> tuple[str | None, dict[str, object] | None]:
     if not isinstance(metrics, Mapping):
         return None, None
-    primary_labels = _primary_labels_for_track(track)
 
     named_exact = metrics.get("named_evals_exact")
     if isinstance(named_exact, Mapping):
-        for label in primary_labels:
-            candidate = metric_payload_by_label(metrics, label)
+        for label in PRIMARY_SUBMISSION_LABELS:
+            candidate = metric_payload_by_label({"named_evals_exact": named_exact}, label)
             if candidate is not None:
                 return label, candidate
         best_label, best_payload = _best_eval_from_mapping(named_exact, exact_labels=True)
@@ -137,8 +81,8 @@ def canonical_submission_eval(
 
     named = metrics.get("named_evals")
     if isinstance(named, Mapping):
-        for label in primary_labels:
-            candidate = metric_payload_by_label(metrics, label)
+        for label in PRIMARY_SUBMISSION_LABELS:
+            candidate = metric_payload_by_label({"named_evals": named}, label)
             if candidate is not None:
                 return label, candidate
         best_label, best_payload = _best_eval_from_mapping(named, exact_labels=False)
@@ -152,19 +96,14 @@ def canonical_submission_eval(
     return None, None
 
 
-def canonical_submission_fields(
-    metrics: Mapping[str, object] | None,
-    *,
-    track: str | None = None,
-) -> dict[str, object]:
-    return canonical_submission_fields_for_status(metrics, status="completed", track=track)
+def canonical_submission_fields(metrics: Mapping[str, object] | None) -> dict[str, object]:
+    return canonical_submission_fields_for_status(metrics, status="completed")
 
 
 def canonical_submission_fields_for_status(
     metrics: Mapping[str, object] | None,
     *,
     status: str | None,
-    track: str | None = None,
 ) -> dict[str, object]:
     if status != "completed":
         return {
@@ -173,7 +112,7 @@ def canonical_submission_fields_for_status(
             "final_submission_loss": None,
             "final_submission_bpb": None,
         }
-    label, payload = canonical_submission_eval(metrics, track=track)
+    label, payload = canonical_submission_eval(metrics)
     if payload is None:
         return {
             "final_submission_metric_label": None,

@@ -70,6 +70,26 @@ class SubmissionMetricsTest(unittest.TestCase):
         merged_payload = metric_payload_by_label(metrics, "legal_ttt_exact")
         self.assertEqual(merged_payload["eval_time_ms"], 1234)
 
+    def test_track_aware_prequant_metric_preferred_when_requested(self) -> None:
+        metrics = {
+            "named_evals_exact": {
+                "prequant_ttt": {"val_loss": 0.9, "val_bpb": 0.77},
+                "legal_ttt": {"val_loss": 1.0, "val_bpb": 0.78},
+            },
+        }
+        label, payload = canonical_submission_eval(metrics, track="prequant_ttt")
+        self.assertEqual(label, "prequant_ttt_exact")
+        self.assertEqual(payload["val_bpb"], 0.77)
+        self.assertEqual(
+            canonical_submission_fields(metrics, track="prequant_ttt"),
+            {
+                "final_submission_metric_label": "prequant_ttt_exact",
+                "official_submission_metric_label": "prequant_ttt_exact",
+                "final_submission_loss": 0.9,
+                "final_submission_bpb": 0.77,
+            },
+        )
+
     def test_incomplete_run_has_no_official_submission_metric(self) -> None:
         metrics = {
             "named_evals_exact": {
