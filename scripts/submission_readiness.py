@@ -17,7 +17,13 @@ from research.submission_readiness import refresh_submission_artifacts, render_s
 RUNS_ROOT = ROOT / "research" / "results" / "runs"
 
 
-def latest_completed_run(*, family: str | None = None) -> Path | None:
+def latest_completed_run(
+    *,
+    family: str | None = None,
+    lane: str | None = None,
+    track: str | None = None,
+    require_submission_safe: bool = False,
+) -> Path | None:
     candidates: list[Path] = []
     for run_dir in sorted(RUNS_ROOT.glob("*")):
         result_path = run_dir / "result.json"
@@ -28,6 +34,12 @@ def latest_completed_run(*, family: str | None = None) -> Path | None:
             continue
         if family is not None and result.get("family") != family:
             continue
+        if lane is not None and result.get("lane") != lane:
+            continue
+        if track is not None and result.get("track") != track:
+            continue
+        if require_submission_safe and not ((result.get("submission_readiness") or {}).get("submission_safe")):
+            continue
         candidates.append(run_dir)
     return candidates[-1] if candidates else None
 
@@ -37,12 +49,24 @@ def main() -> None:
     parser.add_argument("--run-dir", help="Path to a completed run directory.")
     parser.add_argument("--latest", action="store_true", help="Use the latest completed run directory.")
     parser.add_argument("--family", help="Optional family filter when using --latest, e.g. frontier.")
+    parser.add_argument("--lane", help="Optional lane filter such as stable or challenger.")
+    parser.add_argument("--track", help="Optional track filter such as score_first_ttt or prequant_ttt.")
+    parser.add_argument(
+        "--require-submission-safe",
+        action="store_true",
+        help="Require the selected run to report submission_safe=true.",
+    )
     parser.add_argument("--rewrite", action="store_true", help="Rewrite result/summary/legality fields with canonical submission metadata.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     args = parser.parse_args()
 
     if args.latest:
-        run_dir = latest_completed_run(family=args.family)
+        run_dir = latest_completed_run(
+            family=args.family,
+            lane=args.lane,
+            track=args.track,
+            require_submission_safe=args.require_submission_safe,
+        )
         if run_dir is None:
             raise SystemExit("No matching completed run directories found.")
     elif args.run_dir:
@@ -52,6 +76,8 @@ def main() -> None:
 
     refreshed = refresh_submission_artifacts(run_dir, rewrite=args.rewrite)
     report = refreshed["submission_readiness"]
+    if args.require_submission_safe and not report.get("submission_safe"):
+        raise SystemExit(f"Run is not submission_safe: {run_dir}")
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
         return

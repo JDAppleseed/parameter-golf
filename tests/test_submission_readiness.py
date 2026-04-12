@@ -14,6 +14,7 @@ class SubmissionReadinessTest(unittest.TestCase):
     def test_sync_summary_promotes_canonical_metric_and_preserves_training_best(self) -> None:
         result = sync_result_submission_fields(
             {
+                "track": "score_first_ttt",
                 "metrics": {
                     "named_evals_exact": {
                         "final_int6_sliding_window": {"val_loss": 1.2, "val_bpb": 0.94086717},
@@ -39,6 +40,10 @@ class SubmissionReadinessTest(unittest.TestCase):
             {
                 "status": "completed",
                 "preset": "sota_plus_ppm_entropy_fixed",
+                "lane": "stable",
+                "track": "score_first_ttt",
+                "risk": "green",
+                "submission_safe": True,
                 "git_commit": "deadbeef",
                 "submission_budget_estimate_bytes": 4_794_942,
                 "metrics": {
@@ -84,8 +89,10 @@ class SubmissionReadinessTest(unittest.TestCase):
         self.assertEqual(report["official_submission_eval_seconds"], 716.16)
         self.assertEqual(report["eval_stages_seconds"]["diagnostic_post_ema"], 8.404)
         self.assertEqual(report["eval_stages_seconds"]["legal_ttt"], 716.16)
-        self.assertTrue(report["byte_budget_constraint_appears_satisfied"])
-        self.assertTrue(report["wall_clock_constraint_appears_satisfied"])
+        self.assertTrue(report["artifact_budget_ok"])
+        self.assertTrue(report["train_budget_ok"])
+        self.assertFalse(report["end_to_end_budget_ok"])
+        self.assertTrue(report["submission_safe"])
         self.assertTrue(report["consistent"])
 
     def test_failed_run_clears_official_submission_fields(self) -> None:

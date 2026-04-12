@@ -29,6 +29,7 @@ from frontier_cache import (
     validate_cache_override_expectations,
 )
 from research.frontier_registry import FRONTIER_PRESETS, FRONTIER_SCALES
+from research.leaderboard_targets import leaderboard_deltas, leaderboard_snapshot_record
 from research.presets import PRESETS, RUN_SCALES, Preset, RunScale
 from research.byte_budget import write_budget_reports
 from research.submission_readiness import write_submission_readiness_reports
@@ -394,15 +395,52 @@ def collect_artifacts(run_dir: Path) -> dict[str, object]:
     return artifacts
 
 
-def preferred_eval(metrics: dict[str, object]) -> tuple[str | None, dict[str, object] | None]:
-    return canonical_submission_eval(metrics)
+def preferred_eval(metrics: dict[str, object], *, track: str | None = None) -> tuple[str | None, dict[str, object] | None]:
+    return canonical_submission_eval(metrics, track=track)
 
 
-def final_bpb(metrics: dict[str, object]) -> float | None:
-    _label, candidate = preferred_eval(metrics)
+def final_bpb(metrics: dict[str, object], *, track: str | None = None) -> float | None:
+    _label, candidate = preferred_eval(metrics, track=track)
     if isinstance(candidate, dict) and "val_bpb" in candidate:
         return float(candidate["val_bpb"])
     return None
+
+
+def load_json_if_exists(path: Path) -> dict[str, object] | None:
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_rule_audit(run_dir: Path, preset: Preset, result: dict[str, object]) -> dict[str, object]:
+    audit = {
+        "preset": preset.name,
+        "lane": preset.lane,
+        "track": preset.track,
+        "risk": preset.risk,
+        "manual_review_required": preset.requires_manual_rule_review,
+        "submission_safe": False if preset.lane == "challenger" else bool(preset.submission_safe),
+        "official_submission_metric_label": result.get("official_submission_metric_label"),
+        "official_submission_bpb": result.get("official_submission_bpb") or result.get("final_submission_bpb"),
+        "legality_summary": list(preset.legality_summary),
+    }
+    lines = [
+        f"preset: {audit['preset']}",
+        f"lane: {audit['lane']}",
+        f"track: {audit['track']}",
+        f"risk: {audit['risk']}",
+        f"manual_review_required: {audit['manual_review_required']}",
+        f"submission_safe: {audit['submission_safe']}",
+        f"official_submission_metric_label: {audit['official_submission_metric_label']}",
+        f"official_submission_bpb: {audit['official_submission_bpb']}",
+        "",
+        "review_points:",
+    ]
+    for item in audit["legality_summary"]:
+        lines.append(f"- {item}")
+    (run_dir / "rule_audit.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (run_dir / "rule_audit.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return audit
 
 
 def config_diff(base_env: dict[str, str], resolved_env: dict[str, str]) -> dict[str, dict[str, str | None]]:
@@ -421,7 +459,7 @@ def config_diff(base_env: dict[str, str], resolved_env: dict[str, str]) -> dict[
 def write_legality_note(run_dir: Path, preset: Preset, result: dict[str, object]) -> dict[str, object]:
     status = str(result.get("status") or "incomplete")
     artifact_bytes = result.get("submission_budget_estimate_bytes")
-    final_metric_present = final_bpb(result.get("metrics") or {}) is not None
+    final_metric_present = result.get("final_submission_bpb") is not None
     artifact_budget_ok = artifact_bytes is None or int(artifact_bytes) <= 16_000_000
     if status != "completed":
         legality_status = "incomplete"
@@ -470,8 +508,8 @@ def regenerate_csv_index(records: list[dict[str, object]]) -> None:
                 "target": record.get("target"),
                 "status": record.get("status"),
                 "exit_code": record.get("exit_code"),
-                "final_val_bpb": record.get("final_submission_bpb") or final_bpb(metrics) or "",
-                "final_val_loss": record.get("final_submission_loss") or (((preferred_eval(metrics)[1]) or {}).get("val_loss") or ""),
+                "final_val_bpb": record.get("final_submission_bpb") or final_bpb(metrics, track=str(record.get("track") or "") or None) or "",
+                "final_val_loss": record.get("final_submission_loss") or (((preferred_eval(metrics, track=str(record.get("track") or "") or None)[1]) or {}).get("val_loss") or ""),
                 "compressed_model_bytes": record.get("compressed_model_bytes") or artifact_metrics.get("compressed_model_bytes_logged") or "",
                 "counted_code_bytes": record.get("counted_code_bytes") or "",
                 "submission_budget_estimate_bytes": record.get("submission_budget_estimate_bytes") or artifact_metrics.get("total_submission_bytes_logged") or "",
@@ -552,6 +590,8 @@ def print_presets() -> None:
         preset = ALL_PRESETS[preset_name]
         print(f"{preset.name}: {preset.description}")
         print(f"  family: {preset.family}")
+        print(f"  lane: {preset.lane} track: {preset.track} risk: {preset.risk}")
+        print(f"  submission_safe: {preset.submission_safe} manual_review: {preset.requires_manual_rule_review}")
         if preset.diff_base:
             print(f"  diff_base: {preset.diff_base}")
         if preset.counted_code_paths:
@@ -582,6 +622,7 @@ def main() -> None:
     parser.add_argument("--skip-checks", action="store_true", help="Skip dependency and dataset preflight checks.")
     parser.add_argument("--preflight-only", action="store_true", help="Run dependency, dataset, and distributed-launch validation without starting training.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve the command and write metadata without launching.")
+    parser.add_argument("--allow-challenger", action="store_true", help="Required to launch challenger presets.")
     parser.add_argument("--list", action="store_true", help="List available presets.")
     parser.add_argument("--list-scales", action="store_true", help="List available run scales.")
     args = parser.parse_args()
@@ -607,6 +648,8 @@ def main() -> None:
             args.preset = str(resume_spec.get("preset"))
 
     preset = get_preset(args.preset)
+    if preset.lane == "challenger" and not args.allow_challenger:
+        parser.error(f"Preset {preset.name!r} is challenger-only; rerun with --allow-challenger to launch it.")
     if preset.launch_mode != "torchrun" and args.nproc_per_node is not None:
         parser.error("--nproc-per-node only applies to torchrun presets")
     resume_scale_name = str((resume_spec or {}).get("scale") or "") or None
@@ -704,6 +747,12 @@ def main() -> None:
         "preset": preset.name,
         "scale": scale.name if scale is not None else None,
         "family": preset.family,
+        "lane": preset.lane,
+        "track": preset.track,
+        "risk": preset.risk,
+        "submission_safe": preset.submission_safe,
+        "requires_manual_rule_review": preset.requires_manual_rule_review,
+        "competitive_target": preset.competitive_target,
         "diff_base": preset.diff_base,
         "config_diff_from_base": env_diff,
         "target": preset.target,
@@ -721,6 +770,7 @@ def main() -> None:
         "counted_code_paths": counted_code_paths_for(preset),
         "resolved_env": resolved_env,
         "resolved_cache_config": cache_config_record(resolved_cache_config),
+        "leaderboard_snapshot": leaderboard_snapshot_record(),
         "nproc_per_node": nproc_per_node,
         "launch_validation": launch_validation,
         "git_commit": git_commit(),
@@ -774,7 +824,10 @@ def main() -> None:
 
     metrics = parse_trainer_log(train_log_path if train_log_path.is_file() else launcher_log_path)
     result_status = "completed" if exit_code == 0 else ("interrupted" if interrupted else "failed")
-    submission_fields = canonical_submission_fields_for_status(metrics, status=result_status)
+    submission_fields = canonical_submission_fields_for_status(metrics, status=result_status, track=preset.track)
+    summary_payload = load_json_if_exists(run_dir / "run_summary.json") or {}
+    mainline_surface = load_json_if_exists(run_dir / "mainline_surface.json") or {}
+    quant_surface = load_json_if_exists(run_dir / "quant_surface.json") or {}
     artifacts = collect_artifacts(run_dir)
     compressed_model_bytes = None
     for name, info in artifacts.items():
@@ -788,6 +841,21 @@ def main() -> None:
             budget_report = write_budget_reports(run_dir, counted_code_paths_for(preset))
         except Exception as exc:  # noqa: BLE001
             budget_report = {"error": str(exc)}
+
+    final_submission_bpb = submission_fields.get("final_submission_bpb")
+    official_label, official_payload = canonical_submission_eval(metrics, track=preset.track)
+    official_eval_seconds = None
+    if isinstance(official_payload, dict) and official_payload.get("eval_time_ms") is not None:
+        official_eval_seconds = float(official_payload["eval_time_ms"]) / 1000.0
+    training_best_val_bpb = summary_payload.get("training_best_val_bpb", summary_payload.get("best_val_bpb"))
+    training_best_val_loss = summary_payload.get("training_best_val_loss", summary_payload.get("best_val_loss"))
+    prequant_to_postquant_delta_bpb = None
+    if training_best_val_bpb is not None and final_submission_bpb is not None:
+        prequant_to_postquant_delta_bpb = round(float(final_submission_bpb) - float(training_best_val_bpb), 6)
+    export_seconds = None
+    if isinstance(summary_payload, dict):
+        export_seconds = summary_payload.get("export_seconds")
+    target_deltas = leaderboard_deltas(float(final_submission_bpb)) if final_submission_bpb is not None else leaderboard_deltas(None)
 
     result = {
         **run_spec,
@@ -806,20 +874,37 @@ def main() -> None:
         ),
         "byte_budget": budget_report,
         "metrics": metrics,
+        "mainline_surface": mainline_surface or None,
+        "quant_surface": quant_surface or None,
+        "training_best_val_loss": training_best_val_loss,
+        "training_best_val_bpb": training_best_val_bpb,
+        "post_quant_official_bpb": final_submission_bpb,
+        "official_eval_seconds": official_eval_seconds,
+        "export_seconds": export_seconds,
+        "prequant_to_postquant_delta_bpb": prequant_to_postquant_delta_bpb,
         **submission_fields,
+        **target_deltas,
     }
     if isinstance(budget_report, dict):
         result["exported_model_bytes"] = budget_report.get("exported_bytes_measured")
         result["artifact_bytes_measured"] = budget_report.get("artifact_bytes_measured")
         result["remaining_headroom_to_16mb"] = budget_report.get("remaining_headroom_to_16MB")
+        result["artifact_headroom_bytes"] = budget_report.get("remaining_headroom_to_16MB")
+    if preset.lane == "challenger":
+        result["submission_safe"] = False
+        result["manual_review_required"] = True
+    else:
+        result["manual_review_required"] = preset.requires_manual_rule_review
     result["legality_note"] = write_legality_note(run_dir, preset, result)
+    if preset.lane == "challenger":
+        result["rule_audit"] = write_rule_audit(run_dir, preset, result)
     result["submission_readiness"] = write_submission_readiness_reports(run_dir, result)
     result_path = run_dir / "result.json"
     result["result_path"] = str(result_path)
     result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     append_index(result)
 
-    best_bpb = final_bpb(metrics) if result_status == "completed" else None
+    best_bpb = final_bpb(metrics, track=preset.track) if result_status == "completed" else None
     if best_bpb is None:
         print(f"result: {result['status']} exit_code={exit_code} wall_clock_seconds={wall_clock_seconds}")
     else:

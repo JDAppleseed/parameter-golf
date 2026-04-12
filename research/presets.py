@@ -5,6 +5,12 @@ from dataclasses import dataclass
 
 DEFAULT_DATA_PATH = "./data/datasets/fineweb10B_sp1024"
 DEFAULT_TOKENIZER_PATH = "./data/tokenizers/fineweb_1024_bpe.model"
+DEFAULT_SP8192_DATA_PATH = "./data/datasets/fineweb10B_sp8192"
+DEFAULT_SP8192_TOKENIZER_PATH = "./data/tokenizers/fineweb_8192_bpe.model"
+DEFAULT_SP7680_DATA_PATH = "./data/datasets/fineweb10B_sp7680"
+DEFAULT_SP7680_TOKENIZER_PATH = "./data/tokenizers/fineweb_7680_bpe.model"
+DEFAULT_SP7168_DATA_PATH = "./data/datasets/fineweb10B_sp7168"
+DEFAULT_SP7168_TOKENIZER_PATH = "./data/tokenizers/fineweb_7168_bpe.model"
 
 
 @dataclass(frozen=True)
@@ -23,6 +29,12 @@ class Preset:
     counted_code_paths: tuple[str, ...] = ()
     required_modules: tuple[str, ...] = ()
     legality_summary: tuple[str, ...] = ()
+    lane: str = "stable"
+    track: str = "fixed_predictor"
+    risk: str = "green"
+    submission_safe: bool = False
+    requires_manual_rule_review: bool = False
+    competitive_target: str = "merged_safe"
 
 
 @dataclass(frozen=True)
@@ -468,6 +480,22 @@ RUN_SCALES: dict[str, RunScale] = {
         },
         notes=(
             "Use this only for branches that have already earned local trust.",
+        ),
+    ),
+    "submit_safe": RunScale(
+        name="submit_safe",
+        description="Final stable-lane rung with a 595s train cap and only canonical eval paths enabled.",
+        env={
+            "MAX_WALLCLOCK_SECONDS": "595",
+            "VAL_LOSS_EVERY": "4000",
+            "VAL_MAX_SEQS": "0",
+            "FINAL_VAL_MAX_SEQS": "0",
+            "FINAL_QUANT_EVAL": "1",
+            "EVAL_EXTRA_S64": "0",
+        },
+        notes=(
+            "Use only for stable-lane finalists that are ready for promotion.",
+            "This scale is intended to minimize non-canonical extra eval work while leaving a small training buffer under 600 seconds.",
         ),
     ),
 }

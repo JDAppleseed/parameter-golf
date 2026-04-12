@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Protocol, Sequence
 
 import numpy as np
 import torch
@@ -17,6 +17,27 @@ class WindowShardPlan:
     suffix_end: int | None
     local_start: int | None
     local_end: int | None
+
+
+@dataclass
+class EvalStageTiming:
+    label: str
+    seconds: float
+
+
+class EvalScorerHook(Protocol):
+    def score_segment(
+        self,
+        token_stream: np.ndarray,
+        positions: np.ndarray,
+        model_probs: np.ndarray,
+        model_entropy: np.ndarray | None = None,
+    ) -> np.ndarray: ...
+
+    def commit_segment(self, token_stream: np.ndarray, positions: np.ndarray) -> None: ...
+
+    @property
+    def label(self) -> str: ...
 
 
 def sliding_window_starts(
@@ -149,3 +170,21 @@ def reduce_eval_totals(
         dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
         dist.all_reduce(byte_count, op=dist.ReduceOp.SUM)
     return loss_sum, token_count, byte_count
+
+
+def apply_scorer_hook(
+    hook: EvalScorerHook | None,
+    token_stream: np.ndarray,
+    positions: np.ndarray,
+    model_probs: np.ndarray,
+    model_entropy: np.ndarray | None = None,
+) -> np.ndarray:
+    if hook is None:
+        return model_probs
+    scored = hook.score_segment(token_stream, positions, model_probs, model_entropy)
+    hook.commit_segment(token_stream, positions)
+    return scored
+
+
+def stage_timing_record(label: str, seconds: float) -> dict[str, float | str]:
+    return {"label": label, "seconds": round(seconds, 6)}
