@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from huggingface_hub import hf_hub_download
-from huggingface_hub.utils import EntryNotFoundError
 
 
 DOCS_FILENAME = "docs_selected.jsonl"
@@ -33,6 +31,22 @@ DEFAULT_REMOTE_ROOT = os.environ.get("MATCHED_FINEWEB_REMOTE_ROOT_PREFIX", "data
 DEFAULT_CONFIG = Path(__file__).with_name("tokenizer_specs.json")
 TOKENIZER_THREADS = max(1, int(os.environ.get("MATCHED_FINEWEB_TOKENIZER_THREADS", str(os.cpu_count() or 8))))
 SP_BATCH_SIZE = max(1, int(os.environ.get("MATCHED_FINEWEB_SP_BATCH_SIZE", "1024")))
+
+
+def _hf_hub_download(*args, **kwargs):
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:  # pragma: no cover - dependency availability varies by environment
+        raise RuntimeError("huggingface_hub is required for docs download / retokenization workflows") from exc
+    return hf_hub_download(*args, **kwargs)
+
+
+def _entry_not_found_exception():
+    try:
+        from huggingface_hub.utils import EntryNotFoundError
+    except ImportError as exc:  # pragma: no cover - dependency availability varies by environment
+        raise RuntimeError("huggingface_hub is required for docs download / retokenization workflows") from exc
+    return EntryNotFoundError
 
 
 @dataclass(frozen=True)
@@ -86,16 +100,17 @@ def maybe_load_docs_sidecar_meta(docs_jsonl: Path) -> dict[str, Any] | None:
 
 def copy_from_hf_cache(*, repo_id: str, remote_root: str, filename: str, destination: Path) -> bool:
     remote_path = Path(remote_root) / filename if remote_root else Path(filename)
+    entry_not_found_error = _entry_not_found_exception()
     try:
         cached_path = Path(
-            hf_hub_download(
+            _hf_hub_download(
                 repo_id=repo_id,
                 filename=remote_path.name,
                 subfolder=remote_path.parent.as_posix() if remote_path.parent != Path(".") else None,
                 repo_type="dataset",
             )
         )
-    except EntryNotFoundError:
+    except entry_not_found_error:
         return False
 
     source = cached_path.resolve(strict=True)
@@ -187,6 +202,19 @@ def load_specs(config_path: Path) -> list[dict[str, Any]]:
     if not all(isinstance(spec, dict) for spec in specs):
         raise ValueError("each tokenizer spec must be a JSON object")
     return [dict(spec) for spec in specs]
+
+
+def filter_specs_for_variant(specs: list[dict[str, Any]], variant: str | None) -> list[dict[str, Any]]:
+    if variant is None:
+        return [dict(spec) for spec in specs]
+    filtered = [
+        dict(spec)
+        for spec in specs
+        if str(spec.get("dataset_suffix", "")) == variant or str(spec.get("name", "")) == variant
+    ]
+    if not filtered:
+        raise ValueError(f"variant {variant!r} not found in tokenizer config")
+    return filtered
 
 
 def tokenizer_kind(spec: dict[str, Any]) -> str:
@@ -314,6 +342,7 @@ def export_shards(
     num_val_docs: int,
     shard_size: int,
     docs_total: int,
+    max_train_shards: int | None = None,
 ) -> dict[str, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     for pattern in ("fineweb_train_*.bin", "fineweb_val_*.bin"):
@@ -335,6 +364,7 @@ def export_shards(
     fill = 0
     split = "val"
     shards = {"val": 0, "train": 0}
+    train_limit_reached = False
 
     def flush() -> None:
         nonlocal fill
@@ -353,8 +383,14 @@ def export_shards(
     batch_encode = tok.get("encode_batch")
     batch_size = SP_BATCH_SIZE if callable(batch_encode) else 1
     for texts in batched_docs_jsonl(docs_jsonl, batch_size):
+        if train_limit_reached:
+            break
         encoded_docs = batch_encode(texts) if callable(batch_encode) else [tok["encode"](text) for text in texts]
-        for text, encoded in zip(texts, encoded_docs, strict=True):
+        if len(texts) != len(encoded_docs):
+            raise ValueError("tokenizer batch encoder returned a mismatched number of documents")
+        for text, encoded in zip(texts, encoded_docs):
+            if train_limit_reached:
+                break
             del text
             split_for_doc = "val" if stats["docs_total"] < num_val_docs else "train"
             if split_for_doc != split:
@@ -385,13 +421,22 @@ def export_shards(
                 pos += take
                 if fill == shard_size:
                     flush()
+                    if split == "train" and max_train_shards is not None and shards["train"] >= max_train_shards:
+                        train_limit_reached = True
+                        break
+
+        if train_limit_reached:
+            break
 
         if stats["docs_total"] and stats["docs_total"] % 100_000 == 0:
             print(f"{output_dir.name}: {stats['docs_total']}/{docs_total} docs", flush=True)
 
     flush()
-    if stats["docs_total"] != docs_total:
+    if max_train_shards is None and stats["docs_total"] != docs_total:
         raise ValueError(f"expected {docs_total} docs, exported {stats['docs_total']}")
+    if max_train_shards is not None:
+        stats["train_shards_requested"] = int(max_train_shards)
+        stats["train_subset_only"] = shards["train"] >= int(max_train_shards)
     return stats
 
 
@@ -509,6 +554,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="VOCAB=MODEL",
         help="Reuse an existing SentencePiece model for the given vocab size instead of retraining it.",
     )
+    parser.add_argument(
+        "--variant",
+        default=None,
+        help="Optional tokenizer variant selector, for example sp8192 or sp_bpe_8192.",
+    )
+    parser.add_argument(
+        "--max-train-shards",
+        type=int,
+        default=None,
+        help="Optional cap on the number of training shards to export after the full validation split.",
+    )
     return parser
 
 
@@ -516,6 +572,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.chunk_tokens <= 0:
         raise ValueError(f"--chunk_tokens must be positive, got {args.chunk_tokens}")
+    if args.max_train_shards is not None and args.max_train_shards < 0:
+        raise ValueError(f"--max-train-shards must be non-negative, got {args.max_train_shards}")
 
     output_root = Path(args.output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -553,7 +611,7 @@ def main() -> None:
     if not (0 <= num_val_docs <= docs_total):
         raise ValueError(f"num_val_docs must be in [0, {docs_total}], got {num_val_docs}")
 
-    specs = load_specs(Path(args.tokenizer_config).expanduser().resolve())
+    specs = filter_specs_for_variant(load_specs(Path(args.tokenizer_config).expanduser().resolve()), args.variant)
     reuse_sp_models = parse_reuse_sp_models(args.reuse_sp_model)
     tokenizers, selected_specs = build_tokenizers(
         specs=specs,
@@ -599,6 +657,7 @@ def main() -> None:
             num_val_docs=num_val_docs,
             shard_size=int(args.chunk_tokens),
             docs_total=docs_total,
+            max_train_shards=args.max_train_shards,
         )
         manifest["tokenizers"].append(tok["manifest"])
         manifest["datasets"].append(

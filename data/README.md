@@ -38,6 +38,12 @@ Validation is always downloaded in full from the fixed `fineweb_val_*` split. Tr
 
 The default published repo is `willdepueoai/parameter-golf`, with the export rooted under the repo subdirectory `datasets/`.
 
+To inspect whether a cached variant is currently published before downloading, run:
+
+```bash
+python3 data/cached_challenge_fineweb.py --variant sp8192 --check-only --json
+```
+
 ## Rebuilding Tokenizers From Published Docs
 
 To retrain a tokenizer or re-export shards from exactly the same selected documents, run the standalone retokenizer against the published docs cache:
@@ -49,6 +55,18 @@ python3 data/download_hf_docs_and_tokenize.py \
   --output-root /tmp/my_custom_tokenizer_export \
   --tokenizer-config ./data/tokenizer_specs.json
 ```
+
+To rebuild only a single tokenizer family and only the first `N` training shards, use:
+
+```bash
+python3 data/download_hf_docs_and_tokenize.py \
+  --output-root ./data \
+  --tokenizer-config ./data/tokenizer_specs.json \
+  --variant sp8192 \
+  --max-train-shards 1
+```
+
+This is the path used by the RunPod frontier wrapper when a stable variant such as `sp8192` is not present in the published cached manifest but `docs_selected.jsonl` is available.
 
 The sidecar `docs_selected.source_manifest.json` includes `docs_sha256`, so users can verify they are rebuilding from the exact same document list and order as the baseline export.
 

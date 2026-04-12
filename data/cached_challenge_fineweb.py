@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
-
-from huggingface_hub import hf_hub_download
-
 
 REPO_ID = os.environ.get("MATCHED_FINEWEB_REPO_ID", "willdepueoai/parameter-golf")
 REMOTE_ROOT_PREFIX = os.environ.get("MATCHED_FINEWEB_REMOTE_ROOT_PREFIX", "datasets")
@@ -13,12 +13,28 @@ ROOT = Path(__file__).resolve().parent
 DATASETS_DIR = ROOT / "datasets"
 TOKENIZERS_DIR = ROOT / "tokenizers"
 
+
+def _hf_hub_download(*args, **kwargs):
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:  # pragma: no cover - dependency availability varies by environment
+        raise RuntimeError("huggingface_hub is required for cached FineWeb downloads") from exc
+    return hf_hub_download(*args, **kwargs)
+
 def dataset_dir_for_variant(name: str) -> str:
     if name == "byte260":
         return "fineweb10B_byte260"
     if name.startswith("sp") and name[2:].isdigit():
         return f"fineweb10B_{name}"
     raise ValueError(f"unsupported variant {name!r}; expected byte260 or sp<VOCAB_SIZE>")
+
+
+def expected_tokenizer_name_for_variant(name: str) -> str | None:
+    if name == "byte260":
+        return "pure_byte_260"
+    if name.startswith("sp") and name[2:].isdigit():
+        return f"sp_bpe_{name[2:]}"
+    return None
 
 
 def local_path_for_remote(relative_path: str) -> Path:
@@ -41,7 +57,7 @@ def get(relative_path: str) -> None:
 
     remote_path = Path(relative_path)
     cached_path = Path(
-        hf_hub_download(
+        _hf_hub_download(
             repo_id=REPO_ID,
             filename=remote_path.name,
             subfolder=remote_path.parent.as_posix() if remote_path.parent != Path(".") else None,
@@ -84,6 +100,33 @@ def artifact_paths_for_tokenizer(tokenizer_entry: dict) -> list[str]:
     return artifacts
 
 
+def manifest_variant_summary(manifest: dict, variant: str) -> dict[str, object]:
+    dataset_name = dataset_dir_for_variant(variant)
+    expected_tokenizer_name = expected_tokenizer_name_for_variant(variant)
+    dataset_entry = next((x for x in manifest.get("datasets", []) if x.get("name") == dataset_name), None)
+    tokenizer_name = dataset_entry.get("tokenizer_name") if dataset_entry is not None else expected_tokenizer_name
+    tokenizer_entry = (
+        next((x for x in manifest.get("tokenizers", []) if x.get("name") == tokenizer_name), None)
+        if tokenizer_name
+        else None
+    )
+    stats = (dataset_entry or {}).get("stats") or {}
+    artifact_paths: list[str] = []
+    if tokenizer_entry is not None:
+        artifact_paths = artifact_paths_for_tokenizer(tokenizer_entry)
+    return {
+        "variant": variant,
+        "dataset_name": dataset_name,
+        "dataset_present": dataset_entry is not None,
+        "tokenizer_name": tokenizer_name,
+        "expected_tokenizer_name": expected_tokenizer_name,
+        "tokenizer_present": tokenizer_entry is not None,
+        "max_train_shards": None if dataset_entry is None else int(stats.get("files_train", 0)),
+        "val_shards": None if dataset_entry is None else int(stats.get("files_val", 0)),
+        "artifact_paths": artifact_paths,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Download challenge FineWeb shards from Hugging Face")
     parser.add_argument(
@@ -114,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also download docs_selected.jsonl and its sidecar for tokenizer retraining or dataset re-export.",
     )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Inspect manifest availability for the requested variant without downloading shards.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
     return parser
 
 
@@ -125,9 +174,36 @@ def main() -> None:
         raise ValueError("train_shards must be non-negative")
 
     manifest = load_manifest(skip_manifest_download=args.skip_manifest)
+    summary = manifest_variant_summary(manifest, args.variant)
+    summary["repo_id"] = REPO_ID
+    summary["remote_root_prefix"] = REMOTE_ROOT_PREFIX
+    summary["manifest_path"] = str(manifest_path())
+    if args.check_only:
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(f"variant: {summary['variant']}")
+            print(f"dataset_name: {summary['dataset_name']}")
+            print(f"dataset_present: {summary['dataset_present']}")
+            print(f"tokenizer_name: {summary['tokenizer_name']}")
+            print(f"tokenizer_present: {summary['tokenizer_present']}")
+            print(f"repo_id: {summary['repo_id']}")
+            print(f"remote_root_prefix: {summary['remote_root_prefix']}")
+            print(f"manifest_path: {summary['manifest_path']}")
+            if summary.get("max_train_shards") is not None:
+                print(f"max_train_shards: {summary['max_train_shards']}")
+            if summary.get("val_shards") is not None:
+                print(f"val_shards: {summary['val_shards']}")
+            for artifact_path in summary.get("artifact_paths") or []:
+                print(f"artifact_path: {artifact_path}")
+        return
+
+    if not summary["dataset_present"]:
+        raise ValueError(
+            f"dataset {dataset_dir} not found in {REMOTE_ROOT_PREFIX}/manifest.json from {REPO_ID}"
+        )
     dataset_entry = next((x for x in manifest.get("datasets", []) if x.get("name") == dataset_dir), None)
-    if dataset_entry is None:
-        raise ValueError(f"dataset {dataset_dir} not found in {REMOTE_ROOT_PREFIX}/manifest.json")
+    assert dataset_entry is not None
     max_train_shards = int((dataset_entry.get("stats") or {}).get("files_train"))
     val_shards = int((dataset_entry.get("stats") or {}).get("files_val"))
     if train_shards > max_train_shards:
@@ -137,7 +213,7 @@ def main() -> None:
     tokenizer_name = dataset_entry.get("tokenizer_name")
     tokenizer_entry = next((x for x in manifest.get("tokenizers", []) if x.get("name") == tokenizer_name), None)
     if tokenizer_entry is None:
-        raise ValueError(f"tokenizer {tokenizer_name} not found in {REMOTE_ROOT_PREFIX}/manifest.json")
+        raise ValueError(f"tokenizer {tokenizer_name} not found in {REMOTE_ROOT_PREFIX}/manifest.json from {REPO_ID}")
 
     if args.with_docs:
         get(f"{REMOTE_ROOT_PREFIX}/docs_selected.jsonl")
@@ -154,4 +230,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:  # pragma: no cover - shell pipeline behavior
+        sys.exit(0)

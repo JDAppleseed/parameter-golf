@@ -32,9 +32,11 @@ bash scripts/runpod_frontier.sh all
 Notes:
 
 - The wrapper hard-resets the repo checkout to `origin/<branch>` before each run stage.
+- It also wipes stale run outputs, the selected variant dataset/tokenizer artifacts, `data/manifest.json`, `docs_selected.*`, and temporary pip caches inside repo/tmp boundaries before rebuilding the pod state.
 - It fails fast on missing CUDA/FlashAttention readiness, missing dataset shards, or missing tokenizer artifacts.
 - If you do not pass `--variant`, the script resolves a preset-compatible variant for `smoke`, `train`, and `all` so the stable SP8192 defaults stay launchable.
-- Cached-manifest downloads for unpublished variants such as `sp8192` can fail. When that happens, publish the variant or rebuild it before launching the real run.
+- If the cached manifest does not publish the requested variant, the wrapper now bootstraps that variant locally from the published `docs_selected.jsonl` source using the repo's deterministic retokenizer path.
+- If neither the cached variant nor the published docs source is available, prep fails with the exact missing dataset name, manifest source, and the manual bootstrap command to rerun.
 
 ## Stable Lane
 

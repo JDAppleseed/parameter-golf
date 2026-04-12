@@ -54,6 +54,14 @@ RESOLVED_VOCAB_SIZE=""
 PREP_DONE=0
 PREP_PRESET=""
 PREP_VARIANT=""
+VARIANT_SOURCE=""
+CACHED_DATASET_NAME=""
+CACHED_DATASET_PRESENT=0
+CACHED_TOKENIZER_NAME=""
+CACHED_TOKENIZER_PRESENT=0
+CACHED_MANIFEST_PATH=""
+CACHED_REPO_ID=""
+CACHED_REMOTE_ROOT_PREFIX=""
 
 variant_vocab_size() {
   case "$1" in
@@ -224,6 +232,25 @@ ensure_repo() {
   export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 }
 
+cleanup_transient_state() {
+  log "STAGE cleanup: removing stale results, selected variant data, and transient caches"
+  rm -rf "$REPO_DIR/research/results/runs"
+  mkdir -p "$REPO_DIR/research/results/runs"
+  rm -f "$REPO_DIR/research/results/index.jsonl" "$REPO_DIR/research/results/index.csv"
+  if [ -d "$REPO_DIR/research_only/results" ]; then
+    find "$REPO_DIR/research_only/results" -mindepth 1 ! -name '.gitkeep' -exec rm -rf {} +
+  fi
+  rm -rf "$RESOLVED_DATA_PATH"
+  rm -f "$RESOLVED_TOKENIZER_PATH" "${RESOLVED_TOKENIZER_PATH%.model}.vocab"
+  rm -f \
+    "$REPO_DIR/data/manifest.json" \
+    "$REPO_DIR/data/tokenizer_config.export.json" \
+    "$REPO_DIR/data/docs_selected.jsonl" \
+    "$REPO_DIR/data/docs_selected.source_manifest.json"
+  rm -rf /tmp/pip-cache /tmp/pip-tmp
+  mkdir -p /tmp/pip-cache /tmp/pip-tmp
+}
+
 ensure_python_deps() {
   log "STAGE deps: running approved cloud installer"
   (
@@ -240,6 +267,26 @@ ensure_python_deps() {
   fi
 }
 
+inspect_cached_variant_manifest() {
+  local variant="$1"
+  local summary_tsv
+  summary_tsv="$(
+    cd "$REPO_DIR"
+    python3 data/cached_challenge_fineweb.py --variant "$variant" --check-only --json | \
+      python3 -c 'import json, sys; summary = json.load(sys.stdin); print("\t".join([
+summary.get("dataset_name", ""),
+"1" if summary.get("dataset_present") else "0",
+summary.get("tokenizer_name", "") or "",
+"1" if summary.get("tokenizer_present") else "0",
+summary.get("manifest_path", "") or "",
+summary.get("repo_id", "") or "",
+summary.get("remote_root_prefix", "") or "",
+]))'
+  )"
+  IFS=$'\t' read -r CACHED_DATASET_NAME CACHED_DATASET_PRESENT CACHED_TOKENIZER_NAME CACHED_TOKENIZER_PRESENT CACHED_MANIFEST_PATH CACHED_REPO_ID CACHED_REMOTE_ROOT_PREFIX <<< "$summary_tsv"
+  log "STAGE manifest: variant=$variant dataset_present=$CACHED_DATASET_PRESENT tokenizer_present=$CACHED_TOKENIZER_PRESENT manifest=$CACHED_MANIFEST_PATH"
+}
+
 fetch_variant_data() {
   local variant="$1"
   local train_shards="$2"
@@ -250,6 +297,37 @@ fetch_variant_data() {
   ); then
     die "Failed to fetch cached artifacts for variant '$variant'. It may not be published in the cached manifest yet; publish it or rebuild it before running this stage."
   fi
+}
+
+bootstrap_variant_data() {
+  local variant="$1"
+  local train_shards="$2"
+  log "STAGE bootstrap: cached manifest is missing $CACHED_DATASET_NAME, rebuilding $variant from published docs_selected.jsonl"
+  if ! (
+    cd "$REPO_DIR"
+    python3 data/download_hf_docs_and_tokenize.py \
+      --output-root "$REPO_DIR/data" \
+      --tokenizer-config "$REPO_DIR/data/tokenizer_specs.json" \
+      --variant "$variant" \
+      --max-train-shards "$train_shards"
+  ); then
+    die "Failed to bootstrap variant '$variant' from published docs in repo '$CACHED_REPO_ID' under '$CACHED_REMOTE_ROOT_PREFIX'. Retry manually with: python3 data/download_hf_docs_and_tokenize.py --output-root ./data --tokenizer-config ./data/tokenizer_specs.json --variant $variant --max-train-shards $train_shards. If docs_selected.jsonl is not published there, publish docs_selected/source_manifest or publish the pretokenized dataset."
+  fi
+}
+
+ensure_variant_data() {
+  local variant="$1"
+  local train_shards="$2"
+  inspect_cached_variant_manifest "$variant"
+  if [ "$CACHED_DATASET_PRESENT" = "1" ]; then
+    fetch_variant_data "$variant" "$train_shards"
+    VARIANT_SOURCE="cached_manifest"
+  else
+    bootstrap_variant_data "$variant" "$train_shards"
+    VARIANT_SOURCE="rebuild_from_docs"
+  fi
+  [ -d "$RESOLVED_DATA_PATH" ] || die "Expected dataset directory '$RESOLVED_DATA_PATH' was not created for variant '$variant'."
+  [ -f "$RESOLVED_TOKENIZER_PATH" ] || die "Expected tokenizer file '$RESOLVED_TOKENIZER_PATH' was not created for variant '$variant'."
 }
 
 run_env_check() {
@@ -281,6 +359,11 @@ run_data_check() {
       --seq-len 2048
   )
   log "DATA OK"
+}
+
+print_ready_summary() {
+  log "READY: repo synced and stable frontier prep completed"
+  log "READY: variant=$RESOLVED_VARIANT source=$VARIANT_SOURCE dataset=$RESOLVED_DATA_PATH tokenizer=$RESOLVED_TOKENIZER_PATH train_shards=$TRAIN_SHARDS"
 }
 
 run_dry_run() {
@@ -375,13 +458,15 @@ prepare_once() {
   assert_stable_preset "$prep_preset"
   assert_preset_variant_compatible "$prep_preset" "$variant"
   resolve_variant_paths "$variant"
+  cleanup_transient_state
   ensure_python_deps
   run_env_check
-  fetch_variant_data "$variant" "$TRAIN_SHARDS"
+  ensure_variant_data "$variant" "$TRAIN_SHARDS"
   run_data_check "$TRAIN_SHARDS"
   PREP_DONE=1
   PREP_PRESET="$prep_preset"
   PREP_VARIANT="$variant"
+  print_ready_summary
 }
 
 while [ "$#" -gt 0 ]; do
