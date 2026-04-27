@@ -636,9 +636,16 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
+        # Compatibility fallback for torch/SDPA paths that reject enable_gqa.
+        if self.num_kv_heads != self.num_heads:
+            assert self.num_heads % self.num_kv_heads == 0, (
+                self.num_heads, self.num_kv_heads
+            )
+            gqa_repeat = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(gqa_repeat, dim=1)
+            v = v.repeat_interleave(gqa_repeat, dim=1)
         y = F.scaled_dot_product_attention(
             q, k, v, attn_mask=None, is_causal=True,
-            enable_gqa=(self.num_kv_heads != self.num_heads),
         )
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
