@@ -16,8 +16,8 @@ Options:
   --branch NAME                   Branch to hard-reset to. Default: main
   --variant NAME                  Dataset/tokenizer variant. Default: sp1024
   --train-shards N                Number of train shards to fetch. Default: 1
-  --smoke-preset NAME             Smoke preset. Default: sp8192_mainline_base
-  --train-preset NAME             Train preset. Default: sp8192_mainline_submit_safe
+  --smoke-preset NAME             Smoke preset. Default: variant-compatible; without --variant sp8192_mainline_base
+  --train-preset NAME             Train preset. Default: variant-compatible; without --variant sp8192_mainline_submit_safe
   --smoke-run-name NAME           Smoke run name. Default: sp1024_mainline_smoke
   --train-run-name NAME           Train run name. Default: sp8192_mainline_submit
   --seed N                        Seed. Default: 1337
@@ -38,6 +38,8 @@ VARIANT_EXPLICIT=0
 TRAIN_SHARDS="1"
 SMOKE_PRESET="sp8192_mainline_base"
 TRAIN_PRESET="sp8192_mainline_submit_safe"
+SMOKE_PRESET_EXPLICIT=0
+TRAIN_PRESET_EXPLICIT=0
 SMOKE_RUN_NAME="sp1024_mainline_smoke"
 SMOKE_RUN_NAME_EXPLICIT=0
 TRAIN_RUN_NAME="sp8192_mainline_submit"
@@ -133,6 +135,155 @@ print(
     )
 )
 PY
+}
+
+compatible_preset_names_for_variant() {
+  local variant="$1"
+  local expected_dataset expected_tokenizer expected_vocab
+  resolve_variant_paths "$variant"
+  expected_dataset="$(basename "$RESOLVED_DATA_PATH")"
+  expected_tokenizer="$(basename "$RESOLVED_TOKENIZER_PATH")"
+  expected_vocab="$RESOLVED_VOCAB_SIZE"
+  python3 - "$REPO_DIR" "$expected_dataset" "$expected_tokenizer" "$expected_vocab" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+if str(root) not in sys.path:
+    sys.path.insert(0, str(root))
+
+from research.frontier_registry import FRONTIER_PRESETS
+from research.presets import PRESETS
+
+expected_dataset, expected_tokenizer, expected_vocab = sys.argv[2:5]
+all_presets = {**PRESETS, **FRONTIER_PRESETS}
+compatible = []
+for name, preset in all_presets.items():
+    env = preset.env
+    if preset.target != "cuda" or preset.lane != "stable":
+        continue
+    if Path(env.get("DATA_PATH", "")).name != expected_dataset:
+        continue
+    if Path(env.get("TOKENIZER_PATH", "")).name != expected_tokenizer:
+        continue
+    if env.get("VOCAB_SIZE", "") != expected_vocab:
+        continue
+    compatible.append(name)
+
+print(", ".join(sorted(compatible)))
+PY
+}
+
+preset_variant_compatibility_reason() {
+  local preset_name="$1"
+  local variant="$2"
+  local expected_dataset expected_tokenizer expected_vocab
+  resolve_variant_paths "$variant"
+  expected_dataset="$(basename "$RESOLVED_DATA_PATH")"
+  expected_tokenizer="$(basename "$RESOLVED_TOKENIZER_PATH")"
+  expected_vocab="$RESOLVED_VOCAB_SIZE"
+  python3 - "$REPO_DIR" "$preset_name" "$variant" "$expected_dataset" "$expected_tokenizer" "$expected_vocab" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+if str(root) not in sys.path:
+    sys.path.insert(0, str(root))
+
+from research.frontier_registry import FRONTIER_PRESETS
+from research.presets import PRESETS
+
+name, variant, expected_dataset, expected_tokenizer, expected_vocab = sys.argv[2:7]
+all_presets = {**PRESETS, **FRONTIER_PRESETS}
+if name not in all_presets:
+    print(f"preset {name!r} is not registered")
+    raise SystemExit(0)
+
+preset = all_presets[name]
+env = preset.env
+reasons = []
+if preset.target != "cuda":
+    reasons.append(f"target is {preset.target!r}, not 'cuda'")
+if preset.lane != "stable":
+    reasons.append(f"lane is {preset.lane!r}, not 'stable'")
+actual_dataset = Path(env.get("DATA_PATH", "")).name
+actual_tokenizer = Path(env.get("TOKENIZER_PATH", "")).name
+actual_vocab = env.get("VOCAB_SIZE", "")
+if actual_dataset != expected_dataset:
+    reasons.append(f"dataset is {actual_dataset or '<empty>'}, but variant {variant!r} resolves to {expected_dataset}")
+if actual_tokenizer != expected_tokenizer:
+    reasons.append(f"tokenizer is {actual_tokenizer or '<empty>'}, but variant {variant!r} resolves to {expected_tokenizer}")
+if actual_vocab != expected_vocab:
+    reasons.append(f"VOCAB_SIZE is {actual_vocab or '<empty>'}, but variant {variant!r} resolves to {expected_vocab}")
+print("; ".join(reasons) if reasons else "compatible")
+PY
+}
+
+variant_default_preset() {
+  local kind="$1"
+  local variant="$2"
+  case "$kind:$variant" in
+    smoke:sp1024) printf 'baseline\n' ;;
+    train:sp1024) printf 'sota_plus_ppm_dirichlet_submit\n' ;;
+    smoke:sp8192) printf 'sp8192_mainline_base\n' ;;
+    train:sp8192) printf 'sp8192_mainline_submit_safe\n' ;;
+    smoke:sp7680|train:sp7680) printf 'tok_sp7680_clean\n' ;;
+    smoke:sp7168|train:sp7168) printf 'tok_sp7168_clean\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+fail_default_preset_selection() {
+  local variant="$1"
+  local smoke_preset="$2"
+  local train_preset="$3"
+  local smoke_reason="$4"
+  local train_reason="$5"
+  local compatible_names
+  compatible_names="$(compatible_preset_names_for_variant "$variant")"
+  [ -n "$compatible_names" ] || compatible_names="<none discovered>"
+  die "$(cat <<EOF
+No compatible default RunPod presets exist for the requested variant.
+Requested variant: $variant
+Resolved dataset: $(basename "$RESOLVED_DATA_PATH")
+Chosen smoke preset: ${smoke_preset:-<none>}
+Chosen train preset: ${train_preset:-<none>}
+Why incompatible:
+  smoke: $smoke_reason
+  train: $train_reason
+Compatible stable CUDA presets discovered: $compatible_names
+Pass explicit --smoke-preset and --train-preset values that match the requested variant, or add variant-compatible defaults.
+EOF
+)"
+}
+
+resolve_variant_default_presets() {
+  local smoke_preset="" train_preset=""
+  local smoke_reason="not selected" train_reason="not selected"
+  if [ "$VARIANT_EXPLICIT" -ne 1 ] || [ "$SMOKE_PRESET_EXPLICIT" -ne 0 ] || [ "$TRAIN_PRESET_EXPLICIT" -ne 0 ]; then
+    return
+  fi
+
+  resolve_variant_paths "$RESOLVED_VARIANT"
+  if ! smoke_preset="$(variant_default_preset smoke "$RESOLVED_VARIANT")"; then
+    smoke_reason="no smoke default is registered for variant '$RESOLVED_VARIANT'"
+  fi
+  if ! train_preset="$(variant_default_preset train "$RESOLVED_VARIANT")"; then
+    train_reason="no train default is registered for variant '$RESOLVED_VARIANT'"
+  fi
+  if [ -n "$smoke_preset" ]; then
+    smoke_reason="$(preset_variant_compatibility_reason "$smoke_preset" "$RESOLVED_VARIANT")"
+  fi
+  if [ -n "$train_preset" ]; then
+    train_reason="$(preset_variant_compatibility_reason "$train_preset" "$RESOLVED_VARIANT")"
+  fi
+  if [ "$smoke_reason" != "compatible" ] || [ "$train_reason" != "compatible" ]; then
+    fail_default_preset_selection "$RESOLVED_VARIANT" "$smoke_preset" "$train_preset" "$smoke_reason" "$train_reason"
+  fi
+
+  SMOKE_PRESET="$smoke_preset"
+  TRAIN_PRESET="$train_preset"
+  log "Explicit --variant provided; using variant-compatible default presets: smoke_preset=$SMOKE_PRESET train_preset=$TRAIN_PRESET"
 }
 
 variant_from_preset() {
@@ -569,10 +720,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --smoke-preset)
       SMOKE_PRESET="$2"
+      SMOKE_PRESET_EXPLICIT=1
       shift 2
       ;;
     --train-preset)
       TRAIN_PRESET="$2"
+      TRAIN_PRESET_EXPLICIT=1
       shift 2
       ;;
     --smoke-run-name)
@@ -635,6 +788,7 @@ REPO_DIR="$(abs_path "$REPO_DIR")"
 ensure_repo
 resolve_effective_variant "$STAGE"
 resolve_variant_paths "$RESOLVED_VARIANT"
+resolve_variant_default_presets
 
 if [ "$SMOKE_RUN_NAME_EXPLICIT" -eq 0 ] && [ "$SMOKE_RUN_NAME" = "sp1024_mainline_smoke" ] && [ "$RESOLVED_VARIANT" != "sp1024" ]; then
   SMOKE_RUN_NAME="${RESOLVED_VARIANT}_mainline_smoke"

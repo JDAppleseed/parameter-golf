@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 import re
@@ -55,6 +56,41 @@ class RunPodFrontierScriptTest(unittest.TestCase):
         self.assertIn("free_disk_bytes", script)
         self.assertIn("HF_TOKEN", script)
         self.assertIn("publish the pretokenized dataset/tokenizer pair for fast pod startup", script)
+
+    def test_explicit_sp1024_variant_selects_sp1024_compatible_default_presets(self) -> None:
+        script = (ROOT / "scripts/runpod_frontier.sh").read_text(encoding="utf-8")
+        match = re.search(r"(usage\(\) \{.*)\nwhile \[ \"\$#\" -gt 0 \]; do", script, re.DOTALL)
+        self.assertIsNotNone(match)
+        harness = f"""
+set -euo pipefail
+SCRIPT_DIR={str(ROOT / "scripts")!r}
+source "$SCRIPT_DIR/runpod_frontier_common.sh"
+{match.group(1)}
+REPO_DIR={str(ROOT)!r}
+VARIANT=sp1024
+VARIANT_EXPLICIT=1
+SMOKE_PRESET_EXPLICIT=0
+TRAIN_PRESET_EXPLICIT=0
+RESOLVED_VARIANT=sp1024
+resolve_variant_default_presets
+printf '%s\\n%s\\n' "$SMOKE_PRESET" "$TRAIN_PRESET"
+"""
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".sh") as f:
+            f.write(harness)
+            f.flush()
+            result = subprocess.run(
+                ["bash", f.name],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertIn("smoke_preset=baseline", result.stdout)
+        self.assertIn("train_preset=sota_plus_ppm_dirichlet_submit", result.stdout)
+        resolved = result.stdout.strip().splitlines()[-2:]
+        self.assertEqual(resolved, ["baseline", "sota_plus_ppm_dirichlet_submit"])
+        self.assertFalse(any(preset.startswith("sp8192_") for preset in resolved))
 
 
 if __name__ == "__main__":
